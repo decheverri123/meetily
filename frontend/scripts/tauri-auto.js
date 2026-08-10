@@ -80,16 +80,25 @@ if (command === 'build' && platform === 'darwin') {
   if (appPath) {
     const appName = path.basename(appPath);
     const destPath = path.join('/Applications', appName);
-    console.log(`\n🚚 Moving ${appName} to /Applications...`);
+    console.log(`\n🚚 Installing ${appName} to /Applications...`);
     try {
-      execSync(`rm -rf "/Applications/${appName}" "/Applications/meetily.app" "/Applications/Meetily.app"`);
-      execSync(`cp -R "${appPath}" "/Applications/"`);
+      // Remove old versions (sudo for safety)
+      try {
+        execSync(`sudo rm -rf "/Applications/${appName}" "/Applications/meetily.app" "/Applications/Meetily.app"`, { stdio: 'inherit' });
+      } catch (_) {
+        // Ignore if nothing to remove
+      }
+      // Copy with sudo to handle permissions
+      execSync(`sudo cp -R "${appPath}" "/Applications/"`, { stdio: 'inherit' });
       console.log(`✅ Successfully replaced ${destPath}\n`);
     } catch (copyErr) {
-      console.error(`⚠️ Failed to copy ${appName} to /Applications:`, copyErr.message);
+      console.error(`⚠️ Failed to install ${appName} to /Applications:`, copyErr.message);
+      console.error('Hint: You may need to authenticate with your password.\n');
+      process.exit(1);
     }
   } else {
-    console.warn('\n⚠️ Could not find built meetily.app bundle to copy to /Applications');
+    console.warn('\n⚠️ Could not find built meetily.app bundle to install to /Applications');
+    process.exit(1);
   }
 }
 
