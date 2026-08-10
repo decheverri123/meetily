@@ -1547,6 +1547,96 @@ fn resolve_live_llm_provider(provider_str: Option<&str>) -> LLMProvider {
         .unwrap_or(LLMProvider::BuiltInAI)
 }
 
+/// Resolves the effective model name `generate_bounded_live_llm_text` should
+/// use for a non-builtin provider call: `model_name_override` wins when
+/// present (verbatim, ignoring whatever `config_model` says), otherwise falls
+/// back to the Settings-configured `config_model`. `None` means neither was
+/// available - the caller must treat that as an error rather than passing an
+/// empty model name through to the provider.
+fn resolve_effective_model_name(
+    model_name_override: Option<&str>,
+    config_model: Option<&str>,
+) -> Option<String> {
+    model_name_override
+        .or(config_model)
+        .map(str::to_string)
+}
+
+/// Whether `generate_bounded_live_llm_text` must fetch a fresh API key for
+/// `provider_override` rather than reusing the key already loaded alongside
+/// the Settings-configured `ModelConfig` (`model_config.api_key`).
+///
+/// That api_key is always scoped to `settings_provider` specifically (see
+/// `api_get_model_config`'s provider-keyed join in `api/api.rs`) - reusing it
+/// for a *different* overridden provider would silently send one provider's
+/// credential to a different provider's API. True whenever an override is
+/// present and it does not match the Settings-configured provider string,
+/// including when there is no Settings-configured provider at all (an ad-hoc
+/// override with no saved config). Pure/unit-testable like
+/// `resolve_live_llm_provider` above; the actual async key fetch
+/// (`api_get_api_key`) is left to the caller.
+fn provider_override_needs_fresh_key(
+    provider_override: Option<&str>,
+    settings_provider: Option<&str>,
+) -> bool {
+    match provider_override {
+        Some(overridden) => Some(overridden) != settings_provider,
+        None => false,
+    }
+}
+
+/// Resolves which builtin model name `generate_bounded_live_llm_text`'s
+/// BuiltInAI branch should request from `builtin_ai_is_model_ready`/
+/// `generate_with_builtin`: `model_name_override` (threaded through from
+/// `generate_live_action_chip`'s `model_name` param, e.g. a user's explicit
+/// pick via `LiveActionChipModelPicker`) wins verbatim when present, mirroring
+/// `resolve_effective_model_name`'s override precedence for the non-builtin
+/// branch above - and, crucially, `resolve_cached` (standing in for
+/// `resolve_cached_live_insights_model(app)`) is only invoked when there is
+/// NO override. This is the fix for the bug where an explicit override was
+/// silently ignored in favor of whatever `resolve_cached_live_insights_model`
+/// (via `builtin_ai_get_available_summary_model`) auto-picked instead: taking
+/// `resolve_cached` as a parameter (rather than calling
+/// `resolve_cached_live_insights_model` directly) makes that "never even
+/// consult the auto-pick when overridden" behavior itself unit-testable
+/// without a real `AppHandle`.
+async fn resolve_effective_builtin_model_name<F, Fut>(
+    model_name_override: Option<&str>,
+    resolve_cached: F,
+) -> Result<Option<String>, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<String>, String>>,
+{
+    match model_name_override {
+        Some(explicit) => Ok(Some(explicit.to_string())),
+        None => resolve_cached().await,
+    }
+}
+
+/// Selects the API key `generate_bounded_live_llm_text`'s non-builtin branch
+/// sends to `resolve_provider_invocation`: `fresh_override_key` (the result of
+/// an `api_get_api_key` lookup scoped to the override provider) when
+/// `needs_fresh_key` is true, or `settings_api_key` (already loaded alongside
+/// `model_config`) when false. Pulled out of the inline
+/// `if needs_fresh_key { ... } else { ... }` at the call site into its own
+/// pure function - mirroring `resolve_provider_invocation`/
+/// `resolve_live_llm_provider`/`resolve_effective_model_name` above - so the
+/// mux itself, not just `provider_override_needs_fresh_key`'s boolean, is
+/// directly unit-testable and directly exercised by production code, instead
+/// of being hand-reproduced separately in tests.
+fn resolve_live_llm_api_key(
+    needs_fresh_key: bool,
+    fresh_override_key: Option<String>,
+    settings_api_key: Option<String>,
+) -> Option<String> {
+    if needs_fresh_key {
+        fresh_override_key
+    } else {
+        settings_api_key
+    }
+}
+
 /// A resolved plan for calling a configured *non-builtin* summary provider
 /// from `generate_bounded_live_llm_text`, produced by
 /// `resolve_provider_invocation`. Kept separate from the `LLMProvider` enum
@@ -1661,26 +1751,39 @@ pub async fn generate_live_insights(app: tauri::AppHandle) -> Result<String, Str
         .ok_or_else(|| LIVE_INSIGHTS_IN_PROGRESS_ERROR.to_string())?;
     commit_rate_limit_slot(&LIVE_INSIGHTS_LAST_CALL);
 
-    generate_bounded_live_llm_text(&app, LIVE_INSIGHTS_SYSTEM_PROMPT).await
+    generate_bounded_live_llm_text(&app, LIVE_INSIGHTS_SYSTEM_PROMPT, None, None).await
 }
 
 /// Shared implementation behind both `generate_live_insights` and
 /// `generate_live_action_chip`: reads the transcript-so-far, builds the
-/// bounded recent window, resolves the user's *configured summary provider*
-/// (via `api_get_model_config` - the same lookup `stop_recording`'s analytics
-/// call already uses at this file's `summary_config` call site), and
+/// bounded recent window, resolves which summary provider/model to use, and
 /// generates `system_prompt` against it. Callers are responsible for their
 /// own rate-limit check and for holding `LiveInsightsGuard` before calling
 /// this - it does not claim the guard itself, since callers need to validate
 /// their own arguments (e.g. `kind`) before deciding whether to consume a
 /// rate-limit slot/guard claim at all.
 ///
+/// `provider_override`/`model_name_override` let a caller ask for an ad-hoc
+/// provider/model for just this one call, overriding (rather than replacing)
+/// the user's Settings-configured default - `generate_live_insights` always
+/// passes `None`/`None` here, preserving its pre-existing "always use
+/// whatever's configured in Settings → Model Settings" behavior exactly.
+/// `generate_live_action_chip` is the only caller that can pass `Some(..)`.
+/// The underlying lookup (via `api_get_model_config` - the same one
+/// `stop_recording`'s analytics call already uses at this file's
+/// `summary_config` call site) still always runs, both as the fallback
+/// when no override is given and as the source of the API key when the
+/// override's provider matches it (see `provider_override_needs_fresh_key`).
+///
 /// Routing:
-/// - `LLMProvider::BuiltInAI` (including no config / an unparseable provider
-///   string - see `resolve_live_llm_provider`): unchanged pre-existing
-///   behavior - resolves the cached builtin model, confirms it's ready, and
-///   calls the local llama-helper sidecar via `generate_with_builtin`.
-/// - Any other configured provider: validates an API key is present where
+/// - `LLMProvider::BuiltInAI` (including no override + no config / an
+///   unparseable provider string - see `resolve_live_llm_provider`):
+///   unchanged pre-existing behavior - resolves the cached builtin model,
+///   confirms it's ready, and calls the local llama-helper sidecar via
+///   `generate_with_builtin`. An explicit `provider_override` of
+///   `"builtin-ai"` also lands here, behaving identically to the no-config
+///   default.
+/// - Any other resolved provider: validates an API key is present where
 ///   required (see `resolve_provider_invocation`) and makes a single
 ///   non-chunked call via `llm_client::generate_summary` - the same one-shot
 ///   call the post-meeting summary pipeline uses per-chunk, just called once
@@ -1693,6 +1796,8 @@ pub async fn generate_live_insights(app: tauri::AppHandle) -> Result<String, Str
 async fn generate_bounded_live_llm_text(
     app: &tauri::AppHandle,
     system_prompt: &str,
+    provider_override: Option<&str>,
+    model_name_override: Option<&str>,
 ) -> Result<String, String> {
     let segments = {
         let manager_guard = RECORDING_MANAGER.lock().unwrap();
@@ -1724,8 +1829,12 @@ async fn generate_bounded_live_llm_text(
         .ok()
         .flatten();
 
-    let provider =
-        resolve_live_llm_provider(model_config.as_ref().map(|c| c.provider.as_str()));
+    // `provider_override` takes priority over the Settings config, which in
+    // turn takes priority over the None/BuiltInAI default - see
+    // `resolve_live_llm_provider`.
+    let provider = resolve_live_llm_provider(
+        provider_override.or_else(|| model_config.as_ref().map(|c| c.provider.as_str())),
+    );
 
     /// Which call `generate_bounded_live_llm_text` will make once the shared
     /// timeout wrapper below is set up. Resolved *before* that wrapper so
@@ -1739,30 +1848,42 @@ async fn generate_bounded_live_llm_text(
     }
 
     let plan = if provider == LLMProvider::BuiltInAI {
-        let model_name = resolve_cached_live_insights_model(app)
-            .await?
-            .ok_or_else(|| {
-                "No local model configured or ready — configure a builtin AI model in Settings"
-                    .to_string()
-            })?;
+        // `model_name_override` (e.g. a specific model picked via
+        // `LiveActionChipModelPicker`) wins verbatim and, crucially, is
+        // resolved WITHOUT ever consulting `resolve_cached_live_insights_model`'s
+        // auto-pick - otherwise a user's explicit choice would be silently
+        // swapped for whichever model `builtin_ai_get_available_summary_model`
+        // happens to auto-pick. See `resolve_effective_builtin_model_name`.
+        let model_name = resolve_effective_builtin_model_name(model_name_override, || {
+            resolve_cached_live_insights_model(app)
+        })
+        .await?
+        .ok_or_else(|| {
+            "No local model configured or ready — configure a builtin AI model in Settings"
+                .to_string()
+        })?;
 
-        // Proactively confirm the resolved model is actually ready before
-        // paying for a sidecar round-trip, reusing the same underlying
+        // Proactively confirm the resolved model - the override when one was
+        // given, otherwise whatever the cache auto-picked - is actually ready
+        // before paying for a sidecar round-trip, reusing the same underlying
         // readiness check (`ModelManager::is_model_ready`, via the
         // `builtin_ai_is_model_ready` Tauri command) that
         // `SummaryGeneratorButtonGroup` already uses for the equivalent
-        // pre-flight check in the post-meeting summary flow - rather than
-        // reinventing a second readiness check here. Deliberately does NOT
-        // pass `refresh: true` (unlike that flow's call): `model_name` was
-        // just resolved via `resolve_cached_live_insights_model`'s cache,
-        // which is exactly what avoids rescanning the models directory on
-        // every live-insights poll (see `LIVE_INSIGHTS_MODEL_CACHE_TTL`) -
-        // forcing a refresh here on every call/poll would defeat that. This
-        // still catches the common "model missing/corrupted" case via the
-        // manager's in-memory status, and `map_generation_outcome` below is
-        // the reactive backstop for the rarer case where the sidecar's own
-        // load fails anyway (e.g. a race between this check and the actual
-        // load).
+        // pre-flight check in the post-meeting summary flow, rather than
+        // reinventing a second readiness check here. This is also what makes
+        // an explicit `model_name_override` fail loudly instead of silently:
+        // if the specifically requested model isn't ready/available, this
+        // returns `LIVE_LLM_MODEL_UNAVAILABLE_ERROR` below rather than
+        // falling back to a different model. Deliberately does NOT pass
+        // `refresh: true` (unlike that flow's call): rescanning the models
+        // directory on every live-insights poll/chip click would defeat the
+        // point of `resolve_cached_live_insights_model`'s cache (see
+        // `LIVE_INSIGHTS_MODEL_CACHE_TTL`), and an override still benefits
+        // from the manager's already in-memory scan results. This still
+        // catches the common "model missing/corrupted" case via that
+        // in-memory status, and `map_generation_outcome` below is the
+        // reactive backstop for the rarer case where the sidecar's own load
+        // fails anyway (e.g. a race between this check and the actual load).
         let is_ready = builtin_ai_is_model_ready(
             app.clone(),
             app.state::<ModelManagerState>(),
@@ -1776,15 +1897,27 @@ async fn generate_bounded_live_llm_text(
 
         Plan::Builtin { model_name }
     } else {
-        // `provider != BuiltInAI` here only happens when `model_config` parsed
-        // to a non-builtin provider, which is only possible if `model_config`
-        // itself was `Some` (see `resolve_live_llm_provider`).
-        let config = model_config
-            .expect("non-builtin provider implies a loaded ModelConfig");
+        // `provider != BuiltInAI` here happens either because `provider_override`
+        // named a non-builtin provider directly, or because `model_config`
+        // parsed to one (see `resolve_live_llm_provider`) - unlike before
+        // overrides existed, `model_config` itself may still be `None` (e.g.
+        // an ad-hoc override with no Settings config saved at all yet), so it
+        // can no longer be unconditionally unwrapped here.
+        let effective_model_name = resolve_effective_model_name(
+            model_name_override,
+            model_config.as_ref().map(|c| c.model.as_str()),
+        )
+        .ok_or_else(|| {
+            "No model configured for the selected provider — configure one in Settings → \
+             Model Settings."
+                .to_string()
+        })?;
 
         // CustomOpenAI's endpoint/key/generation params live in their own
         // JSON-backed settings row, not on `ModelConfig` - only fetch it when
         // actually needed, mirroring `SummaryService::process_transcript_background`.
+        // Keyed off the *resolved* provider, so an override to CustomOpenAI
+        // fetches this fresh regardless of what `model_config.provider` was.
         let custom_openai_config = if provider == LLMProvider::CustomOpenAI {
             crate::api::api::api_get_custom_openai_config(app.clone(), app.clone().state())
                 .await
@@ -1794,11 +1927,41 @@ async fn generate_bounded_live_llm_text(
             None
         };
 
+        // `model_config.api_key` (when present) is scoped to
+        // `model_config.provider` specifically - see `api_get_model_config`'s
+        // provider-keyed join in `api/api.rs`. It's only safe to reuse when
+        // the resolved provider matches that provider; otherwise it would
+        // silently send the *wrong* provider's credential over the wire.
+        // CustomOpenAI/Ollama never read this value anyway (see
+        // `resolve_provider_invocation`), so skip the extra DB round-trip for
+        // those regardless of whether the provider was overridden.
+        let needs_fresh_key = provider_override_needs_fresh_key(
+            provider_override,
+            model_config.as_ref().map(|c| c.provider.as_str()),
+        ) && !matches!(provider, LLMProvider::Ollama | LLMProvider::CustomOpenAI);
+
+        let fresh_override_key = if needs_fresh_key {
+            let override_provider = provider_override
+                .expect("needs_fresh_key implies provider_override is Some")
+                .to_string();
+            crate::api::api::api_get_api_key(app.clone(), app.clone().state(), override_provider, None)
+                .await
+                .ok()
+        } else {
+            None
+        };
+
+        let api_key = resolve_live_llm_api_key(
+            needs_fresh_key,
+            fresh_override_key,
+            model_config.as_ref().and_then(|c| c.api_key.clone()),
+        );
+
         let invocation = resolve_provider_invocation(
             &provider,
-            &config.model,
-            config.api_key.as_deref(),
-            config.ollama_endpoint.as_deref(),
+            &effective_model_name,
+            api_key.as_deref(),
+            model_config.as_ref().and_then(|c| c.ollama_endpoint.as_deref()),
             custom_openai_config.as_ref(),
         )?;
 
@@ -1962,6 +2125,15 @@ fn live_action_chip_last_call_static(kind: &str) -> &'static Mutex<Option<std::t
 /// `"questions"` (a markdown bullet list of 2-3 short clarifying/follow-up
 /// questions).
 ///
+/// `provider`/`model_name` are optional ad-hoc overrides that let the caller
+/// generate this one chip against a different model than whatever's
+/// configured in Settings → Model Settings, without changing that default for
+/// anything else (`generate_live_insights`'s running summary keeps using the
+/// Settings default regardless). Both are `None` for "use the Settings
+/// default", matching pre-existing behavior exactly - see
+/// `generate_bounded_live_llm_text` for the precedence rules once either is
+/// `Some`.
+///
 /// Deliberately shares `LiveInsightsGuard` - and therefore
 /// `LIVE_INSIGHTS_IN_PROGRESS_ERROR` - with `generate_live_insights` rather
 /// than using an independent lock. Both commands ultimately call
@@ -1987,6 +2159,8 @@ fn live_action_chip_last_call_static(kind: &str) -> &'static Mutex<Option<std::t
 pub async fn generate_live_action_chip(
     app: tauri::AppHandle,
     kind: String,
+    provider: Option<String>,
+    model_name: Option<String>,
 ) -> Result<String, String> {
     // Validate first, before touching the rate limiter or the shared guard -
     // an invalid `kind` shouldn't consume either.
@@ -1999,7 +2173,8 @@ pub async fn generate_live_action_chip(
         .ok_or_else(|| LIVE_INSIGHTS_IN_PROGRESS_ERROR.to_string())?;
     commit_rate_limit_slot(last_call);
 
-    generate_bounded_live_llm_text(&app, system_prompt).await
+    generate_bounded_live_llm_text(&app, system_prompt, provider.as_deref(), model_name.as_deref())
+        .await
 }
 
 #[cfg(test)]
@@ -2879,5 +3054,369 @@ mod live_insights_window_tests {
     #[should_panic(expected = "must not be called for LLMProvider::BuiltInAI")]
     fn resolve_provider_invocation_panics_if_called_with_builtin_ai() {
         let _ = resolve_provider_invocation(&LLMProvider::BuiltInAI, "any-model", None, None, None);
+    }
+
+    // ========================================================================
+    // Ad-hoc provider/model overrides (`generate_live_action_chip`'s
+    // `provider`/`model_name` params, threaded through
+    // `generate_bounded_live_llm_text`)
+    //
+    // Like the section above, `generate_bounded_live_llm_text` itself needs a
+    // real `AppHandle`, so these exercise the pure helpers it delegates to -
+    // `resolve_effective_model_name` and `provider_override_needs_fresh_key` -
+    // plus, where the precedence is just an inline `.or_else()` at the call
+    // site rather than its own function, the exact same combinator chain
+    // reproduced here so a regression in that one-liner still fails a test.
+    // ========================================================================
+
+    /// (a) No override: an override-shaped `None.or_else(settings)` chain
+    /// must resolve identically to the pre-existing "just use whatever
+    /// Settings has" lookup.
+    #[test]
+    fn no_override_falls_back_to_settings_configured_provider() {
+        let provider_override: Option<&str> = None;
+        let settings_provider = Some("groq");
+        assert_eq!(
+            resolve_live_llm_provider(provider_override.or(settings_provider)),
+            LLMProvider::Groq
+        );
+    }
+
+    /// (a) No override and no Settings config at all (fresh install): must
+    /// still default to BuiltInAI, exactly like today.
+    #[test]
+    fn no_override_and_no_settings_config_defaults_to_builtin() {
+        let provider_override: Option<&str> = None;
+        let settings_provider: Option<&str> = None;
+        assert_eq!(
+            resolve_live_llm_provider(provider_override.or(settings_provider)),
+            LLMProvider::BuiltInAI
+        );
+    }
+
+    /// An explicit override takes priority over a *different*
+    /// Settings-configured provider.
+    #[test]
+    fn override_provider_takes_priority_over_settings_configured_provider() {
+        let provider_override = Some("groq");
+        let settings_provider = Some("openai");
+        assert_eq!(
+            resolve_live_llm_provider(provider_override.or(settings_provider)),
+            LLMProvider::Groq
+        );
+    }
+
+    /// An override of `"builtin-ai"` is not just "same as no override" by
+    /// coincidence of both defaulting somewhere - it must resolve to the
+    /// exact same route (BuiltInAI) as the no-config default, even when
+    /// Settings has some *other* provider configured (the override still
+    /// wins).
+    #[test]
+    fn explicit_builtin_override_resolves_to_builtin_even_over_a_different_settings_provider() {
+        let provider_override = Some("builtin-ai");
+        let settings_provider = Some("groq");
+        assert_eq!(
+            resolve_live_llm_provider(provider_override.or(settings_provider)),
+            LLMProvider::BuiltInAI
+        );
+    }
+
+    /// (e) An override model name is used verbatim, ignoring whatever
+    /// `model_config.model` says.
+    #[test]
+    fn resolve_effective_model_name_override_wins_verbatim() {
+        assert_eq!(
+            resolve_effective_model_name(Some("gpt-4o-mini"), Some("gpt-3.5-turbo")),
+            Some("gpt-4o-mini".to_string())
+        );
+    }
+
+    /// No override: falls back to the Settings-configured model, unchanged.
+    #[test]
+    fn resolve_effective_model_name_falls_back_to_settings_model_when_no_override() {
+        assert_eq!(
+            resolve_effective_model_name(None, Some("gpt-3.5-turbo")),
+            Some("gpt-3.5-turbo".to_string())
+        );
+    }
+
+    /// Neither an override nor a Settings-configured model exist (e.g. an
+    /// ad-hoc override with no saved config at all): the caller must treat
+    /// this as an error rather than silently passing an empty model name to
+    /// the provider.
+    #[test]
+    fn resolve_effective_model_name_none_when_neither_override_nor_config_present() {
+        assert_eq!(resolve_effective_model_name(None, None), None);
+    }
+
+    // ========================================================================
+    // Builtin model override (`resolve_effective_builtin_model_name`) - Fix 1
+    // regression coverage: `generate_bounded_live_llm_text`'s BuiltInAI branch
+    // used to resolve the model via `resolve_cached_live_insights_model`
+    // unconditionally, never consulting `model_name_override` at all, so a
+    // user who explicitly picked a specific, available builtin model via
+    // `LiveActionChipModelPicker` would silently get whatever
+    // `resolve_cached_live_insights_model` (i.e.
+    // `builtin_ai_get_available_summary_model`'s auto-pick) resolved to
+    // instead. These call the same async helper production now uses, with the
+    // cache-lookup closure standing in for `resolve_cached_live_insights_model(app)`.
+    // ========================================================================
+
+    /// The core regression this fixes: an explicit override must be used
+    /// verbatim, and the cache's auto-pick closure must never even be invoked
+    /// - proving the override isn't silently swapped for whatever
+    /// `resolve_cached_live_insights_model` would have auto-picked.
+    #[tokio::test]
+    async fn resolve_effective_builtin_model_name_override_wins_without_consulting_cache() {
+        let cache_lookup_called = Arc::new(AtomicBool::new(false));
+        let cache_lookup_called_clone = cache_lookup_called.clone();
+
+        let result = resolve_effective_builtin_model_name(Some("gemma3:1b"), move || {
+            let flag = cache_lookup_called_clone.clone();
+            async move {
+                flag.store(true, Ordering::SeqCst);
+                // A different, non-default model - stands in for whatever
+                // `builtin_ai_get_available_summary_model` would auto-pick,
+                // to prove the override wins over it rather than the two
+                // simply coinciding.
+                Ok(Some("qwen3.5:4b".to_string()))
+            }
+        })
+        .await
+        .expect("an override should resolve successfully");
+
+        assert_eq!(result, Some("gemma3:1b".to_string()));
+        assert!(
+            !cache_lookup_called.load(Ordering::SeqCst),
+            "must not consult resolve_cached_live_insights_model's auto-pick when an override is \
+             present - this is the exact Fix 1 regression: an explicit override was previously \
+             silently ignored in favor of whatever the cache auto-picked"
+        );
+    }
+
+    /// No override: falls back to whatever the cache resolves to, unchanged
+    /// from the pre-existing behavior.
+    #[tokio::test]
+    async fn resolve_effective_builtin_model_name_falls_back_to_cache_when_no_override() {
+        let result = resolve_effective_builtin_model_name(None, || async {
+            Ok(Some("qwen3.5:4b".to_string()))
+        })
+        .await
+        .expect("no override should fall back to the cache");
+
+        assert_eq!(result, Some("qwen3.5:4b".to_string()));
+    }
+
+    /// No override, and the cache lookup itself fails (or resolves to no
+    /// available model): the error/`None` must propagate unchanged, matching
+    /// pre-existing behavior exactly.
+    #[tokio::test]
+    async fn resolve_effective_builtin_model_name_propagates_cache_error_when_no_override() {
+        let err = resolve_effective_builtin_model_name(None, || async {
+            Err("boom: model manager not initialized".to_string())
+        })
+        .await
+        .expect_err("cache lookup errors must propagate when there is no override");
+
+        assert_eq!(err, "boom: model manager not initialized");
+    }
+
+    /// (a) No override: never needs a fresh key fetch, regardless of what
+    /// Settings has configured - the existing `model_config.api_key` is
+    /// always safe to reuse since it's for the very provider being used.
+    #[test]
+    fn provider_override_needs_fresh_key_false_when_no_override() {
+        assert!(!provider_override_needs_fresh_key(None, Some("openai")));
+        assert!(!provider_override_needs_fresh_key(None, None));
+    }
+
+    /// (b) Override provider matches the Settings-configured provider: must
+    /// reuse `model_config.api_key` rather than triggering a redundant fetch.
+    #[test]
+    fn provider_override_needs_fresh_key_false_when_override_matches_settings_provider() {
+        assert!(!provider_override_needs_fresh_key(
+            Some("openai"),
+            Some("openai")
+        ));
+    }
+
+    /// (c) Override provider differs from the Settings-configured provider:
+    /// must require a fresh fetch rather than reusing the wrong provider's
+    /// key.
+    #[test]
+    fn provider_override_needs_fresh_key_true_when_override_differs_from_settings_provider() {
+        assert!(provider_override_needs_fresh_key(
+            Some("claude"),
+            Some("openai")
+        ));
+    }
+
+    /// (c)/(d) Override provider present but there is no Settings config at
+    /// all: must still require a fresh fetch - there is no
+    /// `model_config.api_key` to reuse in the first place.
+    #[test]
+    fn provider_override_needs_fresh_key_true_when_override_present_and_no_settings_config() {
+        assert!(provider_override_needs_fresh_key(Some("claude"), None));
+    }
+
+    // ========================================================================
+    // `resolve_live_llm_api_key` - the extracted mux `generate_bounded_live_llm_text`'s
+    // non-builtin branch uses at its api_key selection call site (Fix 2).
+    // ========================================================================
+
+    #[test]
+    fn resolve_live_llm_api_key_uses_fresh_key_when_needed() {
+        assert_eq!(
+            resolve_live_llm_api_key(
+                true,
+                Some("fresh-key".to_string()),
+                Some("settings-key".to_string())
+            ),
+            Some("fresh-key".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_live_llm_api_key_uses_settings_key_when_not_needed() {
+        assert_eq!(
+            resolve_live_llm_api_key(
+                false,
+                Some("fresh-key".to_string()),
+                Some("settings-key".to_string())
+            ),
+            Some("settings-key".to_string())
+        );
+    }
+
+    /// Needs a fresh key, but the fresh fetch came back empty (e.g. no key
+    /// saved for the override provider) - must resolve to `None`, not
+    /// silently fall back to the (wrong-provider) settings key.
+    #[test]
+    fn resolve_live_llm_api_key_needs_fresh_but_fetch_returned_none() {
+        assert_eq!(
+            resolve_live_llm_api_key(true, None, Some("settings-key".to_string())),
+            None
+        );
+    }
+
+    /// (c) The core regression this override feature must not introduce:
+    /// when the override provider differs from the Settings-configured
+    /// provider, the invocation actually sent to `llm_client::generate_summary`
+    /// must carry the *override* provider's own key - never the
+    /// Settings-configured provider's key that happened to already be loaded
+    /// on `model_config`. Calls the actual `resolve_live_llm_api_key` function
+    /// `generate_bounded_live_llm_text`'s non-builtin branch uses for this mux
+    /// (rather than hand-reproducing its `if needs_fresh_key { .. } else { .. }`
+    /// inline here), so a regression there (inverted condition, forgotten
+    /// `provider_override_needs_fresh_key` call, swapped if/else arms) fails
+    /// this test directly instead of silently passing a hand-copied twin.
+    #[test]
+    fn override_provider_differing_from_settings_uses_its_own_key_not_settings_key() {
+        let provider_override = Some("claude");
+        let settings_provider = Some("openai");
+        let settings_api_key = Some("openai-settings-key".to_string());
+        // Stands in for `api_get_api_key(app, state, "claude".to_string(), None)`.
+        let freshly_fetched_override_key = Some("claude-override-key".to_string());
+
+        let needs_fresh_key =
+            provider_override_needs_fresh_key(provider_override, settings_provider);
+        assert!(needs_fresh_key);
+
+        let api_key = resolve_live_llm_api_key(
+            needs_fresh_key,
+            freshly_fetched_override_key,
+            settings_api_key,
+        );
+
+        let resolved_provider = resolve_live_llm_provider(provider_override.or(settings_provider));
+        assert_eq!(resolved_provider, LLMProvider::Claude);
+
+        let invocation = resolve_provider_invocation(
+            &resolved_provider,
+            "claude-3-5-sonnet",
+            api_key.as_deref(),
+            None,
+            None,
+        )
+        .expect("a freshly fetched key for the override provider should resolve successfully");
+
+        assert_eq!(invocation.api_key, "claude-override-key");
+        assert_ne!(
+            invocation.api_key, "openai-settings-key",
+            "must never send the Settings-configured provider's key to a different overridden provider"
+        );
+    }
+
+    /// (b) Companion to the above: when the override provider *matches* the
+    /// Settings-configured provider, `model_config.api_key` must be reused
+    /// as-is - proving the "differs" branch above isn't just always fetching
+    /// fresh regardless of the comparison. Also calls the real
+    /// `resolve_live_llm_api_key` rather than a hand-reimplemented mux (see
+    /// the test above).
+    #[test]
+    fn override_provider_matching_settings_reuses_settings_key() {
+        let provider_override = Some("openai");
+        let settings_provider = Some("openai");
+        let settings_api_key = Some("openai-settings-key".to_string());
+
+        let needs_fresh_key =
+            provider_override_needs_fresh_key(provider_override, settings_provider);
+        assert!(!needs_fresh_key);
+
+        // A fresh-fetch stand-in that must never be used, given `needs_fresh_key`
+        // is `false` here - proving `resolve_live_llm_api_key` genuinely branches
+        // on `needs_fresh_key` rather than e.g. always preferring a `Some(..)`
+        // fresh key when one happens to be provided.
+        let unused_fresh_key = Some("should-never-be-used".to_string());
+
+        let api_key = resolve_live_llm_api_key(needs_fresh_key, unused_fresh_key, settings_api_key);
+
+        let resolved_provider = resolve_live_llm_provider(provider_override.or(settings_provider));
+        let invocation = resolve_provider_invocation(
+            &resolved_provider,
+            "gpt-4o",
+            api_key.as_deref(),
+            None,
+            None,
+        )
+        .expect("the reused Settings key should resolve successfully");
+
+        assert_eq!(invocation.api_key, "openai-settings-key");
+    }
+
+    /// (d) Override provider has no saved key at all (fresh fetch returns
+    /// nothing, mirroring `api_get_api_key`'s `Ok(String::new())` default for
+    /// an unset key, or a failed lookup) - must produce the exact same
+    /// "No API key configured for {provider}" error as the non-override case
+    /// in `resolve_provider_invocation_groq_without_key_returns_clear_error`
+    /// above, not some override-specific error message.
+    #[test]
+    fn override_provider_with_no_saved_key_returns_same_error_as_non_override_case() {
+        let provider_override = Some("claude");
+        let settings_provider: Option<&str> = None;
+
+        let needs_fresh_key =
+            provider_override_needs_fresh_key(provider_override, settings_provider);
+        assert!(needs_fresh_key);
+
+        // No key configured for "claude" - `api_get_api_key` would resolve to
+        // an empty string, which `resolve_provider_invocation` already treats
+        // as missing (see `resolve_provider_invocation_empty_key_is_treated_as_missing`).
+        let api_key: Option<String> = None;
+
+        let resolved_provider = resolve_live_llm_provider(provider_override.or(settings_provider));
+        let err = resolve_provider_invocation(
+            &resolved_provider,
+            "claude-3-5-sonnet",
+            api_key.as_deref(),
+            None,
+            None,
+        )
+        .expect_err("missing key for the override provider must be rejected");
+
+        assert_eq!(
+            err,
+            "No API key configured for Claude — add it in Settings → Model Settings."
+        );
     }
 }

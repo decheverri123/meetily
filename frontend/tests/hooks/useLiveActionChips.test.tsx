@@ -67,16 +67,11 @@ describe('useLiveActionChips', () => {
       expect(result.current.chips.recap.isLoading).toBe(false);
     });
 
-    // EXPECTED: a click that actually completed (even with nothing useful to
-    // show, e.g. "not enough conversation yet") must leave SOME trace that
-    // distinguishes it from the pristine pre-click state, so the popover can
-    // render something other than the exact same "Click ... to generate."
-    // prompt the user just clicked.
-    // ACTUAL: the resulting state is bit-for-bit identical to
-    // `INITIAL_CHIP_STATE` (never-clicked), so `LiveActionChips.tsx`'s
-    // `!isLoading && !error && !result` branch renders the untouched
-    // "Click ... to generate." placeholder again - the user gets zero
-    // feedback that their click did anything.
+    // A click that actually completed (even with nothing useful to show, e.g.
+    // "not enough conversation yet") must leave SOME trace that distinguishes
+    // it from the pristine pre-click state, so the popover can render
+    // something other than the exact same "Click ... to generate." prompt the
+    // user just clicked. `hasGenerated` is that trace - this locks it in.
     expect(result.current.chips.recap).not.toEqual(PRISTINE_NEVER_CLICKED_STATE);
   });
 

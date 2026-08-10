@@ -11,6 +11,18 @@ import {
 /** The two supported chip kinds, matching the Rust-side `kind` values exactly. */
 export type LiveActionChipKind = 'recap' | 'questions';
 
+/**
+ * Session-only, ad-hoc override of which provider/model powers the next
+ * `generate_live_action_chip` call - set via `LiveActionChipModelPicker`.
+ * `provider`/`modelName` mirror the Rust-side `generate_live_action_chip`
+ * args exactly; when null, those args are omitted entirely so the backend
+ * falls back to the Settings-configured provider/model.
+ */
+export interface LiveActionChipModelOverride {
+  provider: string;
+  modelName: string;
+}
+
 export interface LiveActionChipState {
   /**
    * Latest markdown-formatted chip result. Empty string until first content
@@ -83,8 +95,16 @@ export interface UseLiveActionChipsResult {
  * Unlike useLiveInsights, generation is triggered explicitly by the user
  * (button click) rather than polled, and each kind tracks fully independent
  * state so clicking "Recap" can never clobber "Questions" state or vice versa.
+ *
+ * @param modelOverride Optional session-only provider/model override (see
+ * `LiveActionChipModelOverride`), owned by the caller (page-level state, set
+ * via `LiveActionChipModelPicker`). Read through a ref rather than threaded
+ * into `generate`'s own dependency array, so picking a new override doesn't
+ * change `generate`'s identity mid-render.
  */
-export function useLiveActionChips(): UseLiveActionChipsResult {
+export function useLiveActionChips(
+  modelOverride: LiveActionChipModelOverride | null = null
+): UseLiveActionChipsResult {
   const { isRecording } = useRecordingState();
 
   const [chips, setChips] = useState<Record<LiveActionChipKind, LiveActionChipState>>({
@@ -98,6 +118,11 @@ export function useLiveActionChips(): UseLiveActionChipsResult {
   // that it was fired for a since-ended recording session and should be
   // discarded instead of being applied to the new session's state.
   const epochRef = useRef(0);
+
+  const modelOverrideRef = useRef(modelOverride);
+  useEffect(() => {
+    modelOverrideRef.current = modelOverride;
+  }, [modelOverride]);
 
   const generate = useCallback((kind: LiveActionChipKind) => {
     if (!isRecording) {
@@ -113,7 +138,15 @@ export function useLiveActionChips(): UseLiveActionChipsResult {
       [kind]: { ...prev[kind], isLoading: true, error: null, isRetryable: false },
     }));
 
-    invoke<string>('generate_live_action_chip', { kind })
+    // Omit provider/modelName entirely (rather than passing them as
+    // `undefined`) when there's no override, so the backend's Settings-default
+    // fallback behavior is preserved exactly.
+    const activeOverride = modelOverrideRef.current;
+    const invokeArgs = activeOverride
+      ? { kind, provider: activeOverride.provider, modelName: activeOverride.modelName }
+      : { kind };
+
+    invoke<string>('generate_live_action_chip', invokeArgs)
       .then(result => {
         if (requestEpoch !== epochRef.current) {
           // Belongs to a prior meeting - discard rather than overwrite the new one's state.
