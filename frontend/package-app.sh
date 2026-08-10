@@ -15,6 +15,7 @@ echo "Building Next.js app..."
 pnpm build
 
 echo "Building Tauri app..."
-pnpm tauri build
+pnpm run tauri:build
+
 
 echo "App packaging complete! Check src-tauri/target/release/bundle for the packaged app."

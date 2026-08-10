@@ -1,0 +1,47 @@
+{
+  "name": "Therapy Session Note (SOAP)",
+  "description": "Talk-therapy / counseling session note in SOAP format, focused on themes and progress rather than medication management.",
+  "sections": [
+    {
+      "title": "Session Metadata",
+      "instruction": "Client initials/ID, session date, provider, session number or type, duration (HIPAA-sensitive, no full names)",
+      "format": "string"
+    },
+    {
+      "title": "Subjective (S)",
+      "instruction": "Client's self-reported mood, concerns, and updates since the last session",
+      "format": "paragraph"
+    },
+    {
+      "title": "Objective (O)",
+      "instruction": "Observed affect, engagement, and behavior during the session",
+      "format": "paragraph"
+    },
+    {
+      "title": "Assessment (A)",
+      "instruction": "Clinical impression, themes explored, and progress toward therapy goals",
+      "format": "paragraph"
+    },
+    {
+      "title": "Plan (P)",
+      "instruction": "Therapeutic approach used and next steps",
+      "format": "list",
+      "item_format": "| **Intervention / Technique** | **Rationale** | **Follow-up** |\n| --- | --- | --- |"
+    },
+    {
+      "title": "Coping Strategies & Homework",
+      "instruction": "Techniques or exercises assigned between sessions",
+      "format": "list"
+    },
+    {
+      "title": "Risk Check-in",
+      "instruction": "Lightweight safety/risk screening notes",
+      "format": "paragraph"
+    },
+    {
+      "title": "Next Appointment",
+      "instruction": "Date, time, and modality of next session",
+      "format": "string"
+    }
+  ]
+}

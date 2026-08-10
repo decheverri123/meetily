@@ -1,0 +1,43 @@
+{
+  "name": "YouTube Video Summary",
+  "description": "Structured summary for a YouTube video transcript, highlighting topics, takeaways, and resources.",
+  "sections": [
+    {
+      "title": "Video Info",
+      "instruction": "Video title, channel/creator, URL, and duration",
+      "format": "string"
+    },
+    {
+      "title": "Overview",
+      "instruction": "One-paragraph summary of the video's content and purpose",
+      "format": "paragraph"
+    },
+    {
+      "title": "Key Topics & Chapters",
+      "instruction": "Main sections or topics covered, timestamped where the transcript allows",
+      "format": "list",
+      "item_format": "| **Timestamp** | **Topic** |\n| --- | --- |"
+    },
+    {
+      "title": "Main Takeaways",
+      "instruction": "The core points or lessons a viewer should walk away with",
+      "format": "list"
+    },
+    {
+      "title": "Notable Quotes",
+      "instruction": "Memorable or citable lines from the video",
+      "format": "list",
+      "item_format": "| **Quote** | **Speaker / Timestamp** |\n| --- | --- |"
+    },
+    {
+      "title": "Resources & Links Mentioned",
+      "instruction": "Tools, sites, books, or other videos referenced",
+      "format": "list"
+    },
+    {
+      "title": "Follow-up / Watch Next",
+      "instruction": "Suggested related actions or topics for further research",
+      "format": "paragraph"
+    }
+  ]
+}

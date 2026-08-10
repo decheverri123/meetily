@@ -63,3 +63,33 @@ try {
 } catch (err) {
   process.exit(err.status || 1);
 }
+
+// Post-build actions for macOS
+if (command === 'build' && platform === 'darwin') {
+  const possiblePaths = [
+    path.resolve(process.cwd(), '../target/release/bundle/macos/meetily.app'),
+    path.resolve(process.cwd(), 'target/release/bundle/macos/meetily.app'),
+    path.resolve(__dirname, '../../target/release/bundle/macos/meetily.app'),
+    path.resolve(process.cwd(), '../target/release/bundle/macos/Meetily.app'),
+    path.resolve(process.cwd(), 'target/release/bundle/macos/Meetily.app'),
+    path.resolve(__dirname, '../../target/release/bundle/macos/Meetily.app')
+  ];
+
+  const appPath = possiblePaths.find(p => fs.existsSync(p));
+
+  if (appPath) {
+    const appName = path.basename(appPath);
+    const destPath = path.join('/Applications', appName);
+    console.log(`\n🚚 Moving ${appName} to /Applications...`);
+    try {
+      execSync(`rm -rf "/Applications/${appName}" "/Applications/meetily.app" "/Applications/Meetily.app"`);
+      execSync(`cp -R "${appPath}" "/Applications/"`);
+      console.log(`✅ Successfully replaced ${destPath}\n`);
+    } catch (copyErr) {
+      console.error(`⚠️ Failed to copy ${appName} to /Applications:`, copyErr.message);
+    }
+  } else {
+    console.warn('\n⚠️ Could not find built meetily.app bundle to copy to /Applications');
+  }
+}
+

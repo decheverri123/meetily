@@ -24,6 +24,84 @@ General-purpose meeting notes template focusing on key outcomes and actions.
 - Action Items
 - Discussion Highlights
 
+### 3. `project_sync.json`
+Weekly or bi-weekly project status meeting focusing on milestones and risks.
+
+**Sections:**
+- Meeting Date & Time
+- Attendees
+- Milestones & Status
+- Progress Summary
+- Top Risks & Mitigations
+- Key Decisions
+- Action Items
+- Related Documents
+
+### 4. `retrospective.json`
+Sprint retrospective template for continuous improvement.
+
+**Sections:**
+- Sprint
+- Attendance
+- Start Doing
+- Stop Doing
+- Continue Doing
+- Action Items
+- Notes & Votes
+
+### 5. `sales_marketing_client_call.json`
+Captures client goals, deliverables, and next steps for a sales/client call.
+
+**Sections:**
+- Meeting Metadata
+- Attendees
+- Client Goals & Success Criteria
+- Agreed Deliverables
+- Commercial Terms Discussed
+- Risks & Concerns
+- Next Steps
+
+### 6. `psychatric_session.json`
+AI-assisted psychiatric progress note based on SOAP, including medication and diagnostic tracking.
+
+**Sections:**
+- Session Metadata
+- AI Session Summary
+- Subjective (S)
+- Objective (O)
+- Assessment (A)
+- Plan (P)
+- Medications
+- Diagnoses (DSM/ICD)
+- Safety & Risk Management
+- Next Appointment
+- Audit Trail
+
+### 7. `therapy_session.json`
+Talk-therapy / counseling session note in SOAP format, focused on themes and progress rather than medication management.
+
+**Sections:**
+- Session Metadata
+- Subjective (S)
+- Objective (O)
+- Assessment (A)
+- Plan (P)
+- Coping Strategies & Homework
+- Risk Check-in
+- Next Appointment
+
+### 8. `youtube_summary.json`
+Structured summary for a YouTube video transcript, highlighting topics, takeaways, and resources.
+
+**Sections:**
+- Video Info
+- Overview
+- Key Topics & Chapters
+- Main Takeaways
+- Notable Quotes
+- Resources & Links Mentioned
+- Follow-up / Watch Next
+
 ## Template Structure
 
 Each template JSON file follows this schema:
