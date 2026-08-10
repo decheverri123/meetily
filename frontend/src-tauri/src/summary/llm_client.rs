@@ -73,6 +73,7 @@ pub enum LLMProvider {
     OpenRouter,
     BuiltInAI,
     CustomOpenAI,
+    LmStudio,
 }
 
 impl LLMProvider {
@@ -86,6 +87,7 @@ impl LLMProvider {
             "openrouter" => Ok(Self::OpenRouter),
             "builtin-ai" | "local-llama" | "localllama" => Ok(Self::BuiltInAI),
             "custom-openai" => Ok(Self::CustomOpenAI),
+            "lmstudio" => Ok(Self::LmStudio),
             _ => Err(format!("Unsupported LLM provider: {}", s)),
         }
     }
@@ -170,6 +172,15 @@ pub async fn generate_summary(
                 header::HeaderMap::new(),
             )
         }
+        LLMProvider::LmStudio => {
+            let host = ollama_endpoint
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "http://localhost:1234/v1".to_string());
+            (
+                format!("{}/chat/completions", host),
+                header::HeaderMap::new(),
+            )
+        }
         LLMProvider::CustomOpenAI => {
             let endpoint = custom_openai_endpoint
                 .ok_or_else(|| "Custom OpenAI endpoint not configured".to_string())?;
@@ -200,8 +211,8 @@ pub async fn generate_summary(
         }
     };
 
-    // Add authorization header for non-Claude providers
-    if provider != &LLMProvider::Claude {
+    // Add authorization header for non-Claude, non-Ollama, non-LmStudio providers
+    if provider != &LLMProvider::Claude && provider != &LLMProvider::Ollama && provider != &LLMProvider::LmStudio {
         headers.insert(
             header::AUTHORIZATION,
             format!("Bearer {}", api_key)
@@ -341,6 +352,7 @@ pub(crate) fn provider_name(provider: &LLMProvider) -> &str {
         LLMProvider::Claude => "Claude",
         LLMProvider::Groq => "Groq",
         LLMProvider::Ollama => "Ollama",
+        LLMProvider::LmStudio => "LM Studio",
         LLMProvider::BuiltInAI => "Built-in AI",
         LLMProvider::OpenRouter => "OpenRouter",
         LLMProvider::CustomOpenAI => "Custom OpenAI",
