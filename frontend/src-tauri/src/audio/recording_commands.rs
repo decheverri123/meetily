@@ -12,6 +12,7 @@ use std::sync::{
 };
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     parse_audio_device,
@@ -31,6 +32,12 @@ use super::transcription::{
 // Re-export TranscriptUpdate for backward compatibility
 pub use super::transcription::TranscriptUpdate;
 
+// Used by the live insights feature below (kept as a single hoisted import
+// rather than inline fully-qualified paths mid-function).
+use crate::summary::summary_engine::{
+    builtin_ai_get_available_summary_model, generate_with_builtin, ModelManagerState,
+};
+
 // ============================================================================
 // GLOBAL STATE
 // ============================================================================
@@ -44,6 +51,20 @@ static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 // Listener ID for proper cleanup - prevents microphone from staying active after recording stops
 static TRANSCRIPT_LISTENER_ID: Mutex<Option<tauri::EventId>> = Mutex::new(None);
+
+// Guards concurrent calls to `generate_live_insights` - the frontend polls this
+// command periodically, and we want to skip a tick rather than queue up work
+// if a previous local-LLM generation is still running.
+static LIVE_INSIGHTS_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+// Timestamp of the last accepted `generate_live_insights` call, used for the
+// backend-enforced minimum-interval check below.
+static LIVE_INSIGHTS_LAST_CALL: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+// Cache of the resolved builtin summary model name for `generate_live_insights`
+// (see `LIVE_INSIGHTS_MODEL_CACHE_TTL`).
+static LIVE_INSIGHTS_MODEL_CACHE: Mutex<Option<(Option<String>, std::time::Instant)>> =
+    Mutex::new(None);
 
 // ============================================================================
 // PUBLIC TYPES
@@ -1214,5 +1235,597 @@ pub async fn attempt_device_reconnect(
             error!("Manual reconnection error: {}", e);
             Err(e.to_string())
         }
+    }
+}
+
+// ============================================================================
+// LIVE INSIGHTS (lightweight running summary during an ACTIVE recording)
+//
+// This is intentionally separate from the post-meeting summary pipeline
+// (chunk + synthesize + template in `summary::processor`/`summary::service`).
+// It is a single-shot generation over a bounded recent window of the
+// transcript-so-far, meant to be polled periodically (e.g. every ~45s)
+// while recording is live.
+// ============================================================================
+
+/// Maximum number of Unicode characters (not bytes) of transcript to send to
+/// the local LLM per call. Counting by `.chars().count()` rather than
+/// `.len()` matters here - `.len()` counts UTF-8 bytes, which would silently
+/// shrink the effective window for non-Latin transcripts (e.g. a CJK
+/// character is 3 bytes but 1 char).
+const LIVE_INSIGHTS_MAX_CHARS: usize = 6000;
+
+/// Minimum transcript length (after windowing), in Unicode characters, required
+/// before bothering to call the LLM. Below this, there's nothing meaningful to
+/// summarize yet.
+const LIVE_INSIGHTS_MIN_CHARS: usize = 50;
+
+/// Minimum interval enforced between successive `generate_live_insights`
+/// calls. This is defense-in-depth against a buggy/runaway frontend polling
+/// loop, not a fix for an actual vulnerability - the app is local/single-user.
+/// It just bounds worst-case load on the local LLM sidecar if the intended
+/// ~45s polling cadence were ever violated.
+const LIVE_INSIGHTS_MIN_CALL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a resolved builtin summary model name stays cached before
+/// `generate_live_insights` re-scans the models directory via
+/// `builtin_ai_get_available_summary_model`. Live insights are polled every
+/// ~45s while a meeting is active, so without this cache every poll pays for
+/// a filesystem `scan_models()` walk. A short TTL (vs. caching indefinitely)
+/// means a model added/removed mid-meeting is still picked up within a few
+/// minutes rather than requiring an app restart - this cache only affects
+/// model selection for the live-insights convenience feature, not the
+/// canonical model-selection source of truth used elsewhere.
+const LIVE_INSIGHTS_MODEL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Error returned when `LiveInsightsGuard` fails to claim because a previous
+/// `generate_live_insights` call is still running.
+///
+/// IMPORTANT: `frontend/src/hooks/useLiveInsights.ts` has a matching TS
+/// constant that MUST use this exact same string value - the frontend
+/// pattern-matches on it to decide whether to silently skip a poll tick.
+pub(crate) const LIVE_INSIGHTS_IN_PROGRESS_ERROR: &str = "insights generation already in progress";
+
+/// Error returned by the backend-enforced minimum-interval check when
+/// `generate_live_insights` is called again too soon after the previous call
+/// (see `LIVE_INSIGHTS_MIN_CALL_INTERVAL`).
+pub(crate) const LIVE_INSIGHTS_RATE_LIMITED_ERROR: &str =
+    "insights generation requested too soon - please retry shortly";
+
+/// Local timeout for a single `generate_live_insights` call, deliberately much
+/// shorter than the shared `summary::summary_engine::models::GENERATION_TIMEOUT_SECS`
+/// (900s) used by the post-meeting summary pipeline. That constant is left
+/// untouched - it's out of scope and other long-meeting summaries rely on the
+/// full budget. Live insights are just polled again on the next tick if this
+/// is hit, so a short local timeout is safe and keeps the panel responsive.
+///
+/// This is enforced via a `CancellationToken` passed into `generate_with_builtin`
+/// rather than a bare `tokio::time::timeout` wrapper. `generate_with_builtin`
+/// holds a lock on the shared `SIDECAR_MANAGER` singleton across an in-flight
+/// read from the llama-helper sidecar's stdout, and that stdin/stdout protocol
+/// has no request-ID correlation - it relies on strict one-request-in-flight
+/// ordering. A bare `timeout` would just drop the future on expiry, leaving the
+/// sidecar process running; its eventual (now-abandoned) response would then be
+/// read by the *next* call on the shared pipe - whether another live-insights
+/// poll or the real post-meeting summary pipeline - silently corrupting that
+/// call's output. Cancelling via the token instead runs `generate_with_builtin`'s
+/// internal `tokio::select!` cancellation arm, which calls `manager.shutdown()`
+/// to kill the sidecar and reset its state before returning, so the pipe is
+/// never left desynced.
+const LIVE_INSIGHTS_GENERATION_TIMEOUT_SECS: u64 = 60;
+
+const LIVE_INSIGHTS_SYSTEM_PROMPT: &str = "You are assisting with a meeting that is still in progress. \
+Given the transcript so far, write a brief running summary (2-4 sentences) of what's been discussed, \
+followed by a bulleted list titled \"Action items so far\" covering any action items or decisions \
+mentioned so far. If nothing actionable has come up yet, say so briefly under that heading. Keep it \
+concise and in markdown - this will be shown live during the meeting, so it must be fast to generate \
+and quick to read.";
+
+/// RAII guard for `LIVE_INSIGHTS_IN_PROGRESS`. Releases the flag on drop -
+/// including on panic - so a single missed manual cleanup path can't wedge
+/// live insights off for the rest of the app session.
+struct LiveInsightsGuard;
+
+impl LiveInsightsGuard {
+    /// Attempts to claim the in-progress flag. Returns `None` if another call
+    /// already holds it.
+    fn try_claim() -> Option<Self> {
+        LIVE_INSIGHTS_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for LiveInsightsGuard {
+    fn drop(&mut self) {
+        LIVE_INSIGHTS_IN_PROGRESS.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Join transcript segments into a single string, bounded to `max_chars`
+/// Unicode characters (counted via `.chars().count()`, not UTF-8 bytes -
+/// `.len()` would undercount the remaining budget for non-Latin transcripts).
+///
+/// Walks backward from the most recent segment, including whole segments
+/// until adding the next one would exceed the budget - never cutting a
+/// segment's text in half. If the total transcript is already shorter than
+/// `max_chars`, the whole thing is returned. The single most recent segment
+/// is always included in full even if it alone exceeds `max_chars`. Segments
+/// are only ever trimmed (`str::trim`, which is char-boundary safe) or kept
+/// whole - never sliced mid-string - so byte/char boundaries are never a
+/// concern here.
+fn build_recent_window(
+    segments: &[crate::audio::recording_saver::TranscriptSegment],
+    max_chars: usize,
+) -> String {
+    let mut selected: Vec<&str> = Vec::new();
+    let mut total_len = 0usize;
+
+    for segment in segments.iter().rev() {
+        let text = segment.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+
+        // +1 accounts for the newline that will join this segment to the ones
+        // already selected (no separator needed before the very first one).
+        let added_len = text.chars().count() + if selected.is_empty() { 0 } else { 1 };
+        if !selected.is_empty() && total_len + added_len > max_chars {
+            break;
+        }
+
+        selected.push(text);
+        total_len += added_len;
+    }
+
+    selected.reverse();
+    selected.join("\n")
+}
+
+/// Maps a generation outcome (the raw `Result` from `generate_with_builtin`
+/// plus whether the shared cancellation token ended up cancelled) to the
+/// final `Result<String, String>` returned by `generate_live_insights`.
+/// Extracted so this mapping - in particular, distinguishing a
+/// cancellation/timeout from any other failure - can be unit tested directly
+/// instead of being duplicated inline across tests.
+fn map_generation_outcome(
+    result: Result<String, impl ToString>,
+    was_cancelled: bool,
+) -> Result<String, String> {
+    match result {
+        Ok(text) => Ok(text),
+        Err(_e) if was_cancelled => {
+            Err("Live insights generation timed out — will retry on the next update".to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Whether a value cached at `resolved_at` is still within `ttl`. Pulled out
+/// of `resolve_cached_live_insights_model` so the cache-freshness check can
+/// be unit tested without needing a full Tauri `AppHandle`/`State`.
+fn is_cache_fresh(resolved_at: std::time::Instant, ttl: std::time::Duration) -> bool {
+    resolved_at.elapsed() < ttl
+}
+
+/// Resolves the builtin summary model to use for live insights, reusing a
+/// cached result (see `LIVE_INSIGHTS_MODEL_CACHE_TTL`) instead of rescanning
+/// the models directory via `builtin_ai_get_available_summary_model` on every
+/// poll.
+async fn resolve_cached_live_insights_model(
+    app: &tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    if let Some((cached, resolved_at)) = LIVE_INSIGHTS_MODEL_CACHE.lock().unwrap().clone() {
+        if is_cache_fresh(resolved_at, LIVE_INSIGHTS_MODEL_CACHE_TTL) {
+            return Ok(cached);
+        }
+    }
+
+    let resolved =
+        builtin_ai_get_available_summary_model(app.clone(), app.state::<ModelManagerState>())
+            .await?;
+
+    *LIVE_INSIGHTS_MODEL_CACHE.lock().unwrap() =
+        Some((resolved.clone(), std::time::Instant::now()));
+
+    Ok(resolved)
+}
+
+/// Whether a new `generate_live_insights` call arriving now, given the
+/// timestamp of the previous accepted call, should be rejected as too soon
+/// (see `LIVE_INSIGHTS_MIN_CALL_INTERVAL`). Pulled out into a pure function so
+/// the interval check can be unit tested without sleeping in real time.
+fn is_rate_limited(
+    last_call: Option<std::time::Instant>,
+    min_interval: std::time::Duration,
+) -> bool {
+    match last_call {
+        Some(prev) => prev.elapsed() < min_interval,
+        None => false,
+    }
+}
+
+/// Generate a lightweight running summary + action items from the transcript
+/// accumulated so far during an ACTIVE recording, using the app's local
+/// builtin LLM (llama-helper sidecar). Reads the transcript-so-far itself via
+/// the global recording manager - the frontend does not need to pass it in.
+///
+/// Returns:
+/// - `Ok(markdown)` with a short running summary + "Action items so far" list
+/// - `Ok("")` if there's no active recording or not enough transcript yet
+/// - `Err(LIVE_INSIGHTS_IN_PROGRESS_ERROR)` if a previous call is still
+///   running (frontend should treat this as "skip this tick")
+/// - `Err(LIVE_INSIGHTS_RATE_LIMITED_ERROR)` if called again within
+///   `LIVE_INSIGHTS_MIN_CALL_INTERVAL` of the previous call
+/// - `Err(...)` for other failures (e.g. no builtin model configured/ready)
+#[tauri::command]
+pub async fn generate_live_insights(app: tauri::AppHandle) -> Result<String, String> {
+    {
+        let mut last_call = LIVE_INSIGHTS_LAST_CALL.lock().unwrap();
+        if is_rate_limited(*last_call, LIVE_INSIGHTS_MIN_CALL_INTERVAL) {
+            return Err(LIVE_INSIGHTS_RATE_LIMITED_ERROR.to_string());
+        }
+        *last_call = Some(std::time::Instant::now());
+    }
+
+    let _guard = LiveInsightsGuard::try_claim()
+        .ok_or_else(|| LIVE_INSIGHTS_IN_PROGRESS_ERROR.to_string())?;
+
+    let segments = {
+        let manager_guard = RECORDING_MANAGER.lock().unwrap();
+        match manager_guard.as_ref() {
+            Some(manager) => manager.get_transcript_segments(),
+            None => Vec::new(),
+        }
+    };
+
+    let window = build_recent_window(&segments, LIVE_INSIGHTS_MAX_CHARS);
+    if window.trim().chars().count() < LIVE_INSIGHTS_MIN_CHARS {
+        return Ok(String::new());
+    }
+
+    let model_name = resolve_cached_live_insights_model(&app)
+        .await?
+        .ok_or_else(|| {
+            "No local model configured or ready — configure a builtin AI model in Settings"
+                .to_string()
+        })?;
+
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data directory: {}", e))?;
+
+    let user_prompt = format!("Transcript so far:\n\n{}", window);
+
+    // Live insights are polled frequently and shown while the meeting is still
+    // running, so we cap generation to a much shorter budget than the shared
+    // `GENERATION_TIMEOUT_SECS` (900s) used by the post-meeting summary
+    // pipeline - that constant stays untouched since long meetings legitimately
+    // need the full 15 minutes there. Here, a slow generation just means we
+    // skip this tick and retry on the next poll.
+    //
+    // Deliberately NOT a bare `tokio::time::timeout(...)` around the call: see
+    // the doc comment on `LIVE_INSIGHTS_GENERATION_TIMEOUT_SECS` for why that's
+    // unsafe against the shared sidecar. Instead, a `CancellationToken` is
+    // cancelled by a background timer once the budget elapses, which drives
+    // `generate_with_builtin`'s own `tokio::select!` cancellation arm - that
+    // arm shuts the sidecar down cleanly before returning, so the shared
+    // stdin/stdout pipe can never be left desynced for a later caller.
+    let cancellation_token = CancellationToken::new();
+    let timeout_token = cancellation_token.clone();
+    let timeout_task: JoinHandle<()> = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(
+            LIVE_INSIGHTS_GENERATION_TIMEOUT_SECS,
+        ))
+        .await;
+        timeout_token.cancel();
+    });
+
+    let result = generate_with_builtin(
+        &app_data_dir,
+        &model_name,
+        LIVE_INSIGHTS_SYSTEM_PROMPT,
+        &user_prompt,
+        Some(&cancellation_token),
+    )
+    .await;
+
+    // The timer task is only useful until `generate_with_builtin` returns -
+    // abort it now so a fast (successful or failed) generation doesn't leave a
+    // dangling 60s sleep task running in the background.
+    timeout_task.abort();
+
+    map_generation_outcome(result, cancellation_token.is_cancelled())
+}
+
+#[cfg(test)]
+mod live_insights_window_tests {
+    use super::*;
+    use crate::audio::recording_saver::TranscriptSegment;
+
+    fn seg(id: &str, text: &str) -> TranscriptSegment {
+        TranscriptSegment {
+            id: id.to_string(),
+            text: text.to_string(),
+            audio_start_time: 0.0,
+            audio_end_time: 0.0,
+            duration: 0.0,
+            display_time: "[00:00]".to_string(),
+            confidence: 1.0,
+            sequence_id: 0,
+        }
+    }
+
+    /// Test double for `generate_with_builtin`'s cancellation-aware shape:
+    /// resolves after `delay`, but bails out early with the same cancellation
+    /// error as the real sidecar call if `token` is cancelled first. Shared by
+    /// the cancellation tests below instead of being redefined per-test.
+    async fn simulated_slow_generation(
+        token: &CancellationToken,
+        delay: std::time::Duration,
+    ) -> anyhow::Result<String> {
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => Ok("should not get here".to_string()),
+            _ = token.cancelled() => Err(anyhow::anyhow!("Generation cancelled by user")),
+        }
+    }
+
+    /// Spawns the same "cancel the token after a delay" timer shape used by
+    /// `generate_live_insights` itself, so tests can trigger cancellation
+    /// deterministically without duplicating the spawn boilerplate.
+    fn spawn_cancel_after(token: &CancellationToken, delay: std::time::Duration) -> JoinHandle<()> {
+        let token = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            token.cancel();
+        })
+    }
+
+    #[test]
+    fn build_recent_window_empty_input_returns_empty_string() {
+        let segments: Vec<TranscriptSegment> = Vec::new();
+        assert_eq!(build_recent_window(&segments, 6000), "");
+    }
+
+    #[test]
+    fn build_recent_window_shorter_than_budget_returns_everything() {
+        let segments = vec![seg("1", "hello there"), seg("2", "general kenobi")];
+        let result = build_recent_window(&segments, 6000);
+        assert!(result.contains("hello there"));
+        assert!(result.contains("general kenobi"));
+    }
+
+    #[test]
+    fn build_recent_window_longer_than_budget_snaps_to_segment_boundary() {
+        // Each segment is 10 chars. Budget of 25 naively would cut segment "ccccccccc2" in half.
+        let segments = vec![
+            seg("1", "aaaaaaaaa1"),
+            seg("2", "bbbbbbbbb2"),
+            seg("3", "ccccccccc3"),
+        ];
+        let result = build_recent_window(&segments, 25);
+
+        // Never a partial segment: every included segment's full text appears intact.
+        for included_text in ["bbbbbbbbb2", "ccccccccc3"] {
+            assert!(
+                result.contains(included_text),
+                "expected full segment '{}' in result '{}'",
+                included_text,
+                result
+            );
+        }
+        // The oldest segment must have been dropped rather than truncated.
+        assert!(!result.contains("aaaaaaaaa1"));
+    }
+
+    #[test]
+    fn build_recent_window_never_returns_partial_segment_text() {
+        let segments = vec![seg("1", "0123456789"), seg("2", "abcdefghij")];
+        // Budget (5) only fits part of the most recent segment - naive char-slicing
+        // would yield "fghij". The whole most-recent segment must be kept intact
+        // instead, and the older segment dropped rather than truncated.
+        let result = build_recent_window(&segments, 5);
+
+        assert_eq!(result, "abcdefghij");
+    }
+
+    #[test]
+    fn build_recent_window_counts_unicode_chars_not_utf8_bytes() {
+        // "こんにちは" is 5 Unicode scalar values but 15 UTF-8 bytes (3 bytes/char).
+        // With a budget of 20 *characters*, both segments (5 + 10 = 15 chars,
+        // well under 20) should fit. Byte-based counting would instead see
+        // 15 + 10 = 25 bytes > 20 and wrongly drop the older segment.
+        let segments = vec![seg("1", "bbbbbbbbbb"), seg("2", "こんにちは")];
+        let result = build_recent_window(&segments, 20);
+
+        assert!(
+            result.contains("bbbbbbbbbb"),
+            "older ASCII segment should fit within a 20-char budget once counting is \
+             char-based rather than byte-based; got '{}'",
+            result
+        );
+        assert!(result.contains("こんにちは"));
+    }
+
+    #[test]
+    fn live_insights_guard_prevents_concurrent_claims_and_releases_on_drop() {
+        // Ensure clean starting state in case another test left it claimed.
+        LIVE_INSIGHTS_IN_PROGRESS.store(false, Ordering::SeqCst);
+
+        let first = LiveInsightsGuard::try_claim();
+        assert!(first.is_some(), "first claim should succeed");
+        assert!(
+            LiveInsightsGuard::try_claim().is_none(),
+            "second claim should fail while first is held"
+        );
+
+        drop(first);
+
+        let second = LiveInsightsGuard::try_claim();
+        assert!(second.is_some(), "claim should succeed again after release");
+    }
+
+    /// Mirrors the `CancellationToken` + timer setup in
+    /// `generate_live_insights`: once the background timer cancels the token,
+    /// the in-flight call must map to a retry-friendly error. Calls the real
+    /// `map_generation_outcome` production function directly rather than
+    /// duplicating its match arms inline. `simulated_slow_generation` stands
+    /// in for `generate_with_builtin`'s own cancellation arm, which shuts the
+    /// sidecar down and returns an error rather than being silently dropped.
+    #[tokio::test]
+    async fn generate_live_insights_cancellation_wrapper_maps_cancelled_to_actionable_error() {
+        let cancellation_token = CancellationToken::new();
+        let timer_task =
+            spawn_cancel_after(&cancellation_token, std::time::Duration::from_millis(5));
+
+        let generation_result =
+            simulated_slow_generation(&cancellation_token, std::time::Duration::from_millis(200))
+                .await;
+        timer_task.abort();
+
+        let result = map_generation_outcome(generation_result, cancellation_token.is_cancelled());
+
+        assert_eq!(
+            result,
+            Err("Live insights generation timed out — will retry on the next update".to_string())
+        );
+    }
+
+    /// The `LiveInsightsGuard` is bound in the outer function's scope (`let
+    /// _guard = ...`), so it must release the concurrency flag regardless of
+    /// which branch of the cancellation match executes - including the
+    /// cancelled branch itself. Guards against reintroducing a stuck-forever
+    /// lock now that the timeout is driven by a `CancellationToken` instead of
+    /// a bare `tokio::time::timeout`.
+    #[tokio::test]
+    async fn live_insights_guard_releases_even_when_cancellation_wrapper_fires() {
+        LIVE_INSIGHTS_IN_PROGRESS.store(false, Ordering::SeqCst);
+
+        async fn run_and_get_cancelled() {
+            let _guard = LiveInsightsGuard::try_claim().expect("should claim cleanly");
+
+            let cancellation_token = CancellationToken::new();
+            let timer_task =
+                spawn_cancel_after(&cancellation_token, std::time::Duration::from_millis(5));
+
+            let generation_result = simulated_slow_generation(
+                &cancellation_token,
+                std::time::Duration::from_millis(200),
+            )
+            .await;
+            timer_task.abort();
+
+            let _ = map_generation_outcome(generation_result, cancellation_token.is_cancelled());
+            // `_guard` drops here, at the end of this scope - same as at the end
+            // of `generate_live_insights` itself.
+        }
+
+        run_and_get_cancelled().await;
+
+        assert!(
+            LiveInsightsGuard::try_claim().is_some(),
+            "guard must have released the flag after the wrapped call was cancelled"
+        );
+    }
+
+    /// A fast, successful generation must not leave the 60s timer task running
+    /// in the background - `generate_live_insights` calls `.abort()` on its
+    /// `JoinHandle` as soon as the call returns. Verifies both that the abort
+    /// actually cancels the still-sleeping timer task (rather than letting it
+    /// run to completion) and that the token is never marked cancelled on this
+    /// path, so a fast success can't be misreported as a timeout.
+    #[tokio::test]
+    async fn generate_live_insights_fast_success_aborts_timer_without_misreporting_cancellation() {
+        async fn fast_generation(_token: &CancellationToken) -> anyhow::Result<String> {
+            Ok("done".to_string())
+        }
+
+        let cancellation_token = CancellationToken::new();
+        let timer_task = spawn_cancel_after(
+            &cancellation_token,
+            std::time::Duration::from_secs(LIVE_INSIGHTS_GENERATION_TIMEOUT_SECS),
+        );
+
+        let generation_result = fast_generation(&cancellation_token).await;
+        timer_task.abort();
+
+        let result = map_generation_outcome(generation_result, cancellation_token.is_cancelled());
+
+        assert_eq!(result, Ok("done".to_string()));
+        assert!(
+            !cancellation_token.is_cancelled(),
+            "token must not be cancelled on the fast-success path"
+        );
+
+        // If abort() didn't actually take effect, awaiting the handle would
+        // hang for the full 60s sleep; bound it tightly so a regression fails
+        // fast instead of timing out the test suite.
+        let join_result = tokio::time::timeout(std::time::Duration::from_millis(500), timer_task)
+            .await
+            .expect("aborted timer task should resolve promptly, not run its full 60s sleep");
+        assert!(
+            join_result.is_err() && join_result.unwrap_err().is_cancelled(),
+            "timer task should have been cancelled by abort(), not left running/completed"
+        );
+    }
+
+    /// A failure that is *not* due to cancellation (e.g. sidecar startup
+    /// failure, malformed response) must be surfaced as-is rather than being
+    /// misreported as the "timed out" message - only `was_cancelled == true`
+    /// should trigger that mapping.
+    #[test]
+    fn map_generation_outcome_passes_through_non_cancellation_errors() {
+        let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("sidecar exited early"));
+        let mapped = map_generation_outcome(result, false);
+
+        assert_eq!(mapped, Err("sidecar exited early".to_string()));
+    }
+
+    #[test]
+    fn map_generation_outcome_passes_through_success() {
+        let result: Result<String, anyhow::Error> = Ok("summary text".to_string());
+        let mapped = map_generation_outcome(result, false);
+
+        assert_eq!(mapped, Ok("summary text".to_string()));
+    }
+
+    #[test]
+    fn is_cache_fresh_true_within_ttl() {
+        let now = std::time::Instant::now();
+        assert!(is_cache_fresh(now, std::time::Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn is_cache_fresh_false_once_ttl_elapsed() {
+        let resolved_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        assert!(!is_cache_fresh(
+            resolved_at,
+            std::time::Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn is_rate_limited_false_when_no_previous_call() {
+        assert!(!is_rate_limited(None, std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn is_rate_limited_true_within_min_interval() {
+        let last_call = std::time::Instant::now();
+        assert!(is_rate_limited(
+            Some(last_call),
+            std::time::Duration::from_secs(5)
+        ));
+    }
+
+    #[test]
+    fn is_rate_limited_false_after_min_interval_elapsed() {
+        let last_call = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        assert!(!is_rate_limited(
+            Some(last_call),
+            std::time::Duration::from_secs(5)
+        ));
     }
 }
