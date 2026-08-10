@@ -31,11 +31,12 @@ import { cn, isOllamaNotInstalledError } from '@/lib/utils';
 import { toast } from 'sonner';
 
 export interface ModelConfig {
-  provider: 'ollama' | 'groq' | 'claude' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai';
+  provider: 'ollama' | 'lmstudio' | 'groq' | 'claude' | 'openai' | 'openrouter' | 'builtin-ai' | 'custom-openai';
   model: string;
   whisperModel: string;
   apiKey?: string | null;
   ollamaEndpoint?: string | null;
+  lmstudioEndpoint?: string | null;
   // Custom OpenAI fields
   customOpenAIEndpoint?: string | null;
   customOpenAIModel?: string | null;
@@ -51,6 +52,10 @@ interface OllamaModel {
   size: string;
   modified: string;
 }
+
+// api_get_lmstudio_models returns plain model-name strings (Vec<String> on
+// the Rust side), unlike Ollama/OpenRouter/Groq which return {id, ...} objects.
+const LMSTUDIO_DEFAULT_ENDPOINT = 'http://localhost:1234/v1';
 
 interface OpenRouterModel {
   id: string;
@@ -145,6 +150,13 @@ export function ModelSettingsModal({
   const [isEndpointSectionCollapsed, setIsEndpointSectionCollapsed] = useState<boolean>(true); // Collapsed by default
   const [ollamaNotInstalled, setOllamaNotInstalled] = useState<boolean>(false); // Track if Ollama is not installed
 
+  // LM Studio state
+  const [lmstudioModels, setLmstudioModels] = useState<string[]>([]);
+  const [lmstudioError, setLmstudioError] = useState<string>('');
+  const [lmstudioEndpoint, setLmstudioEndpoint] = useState<string>(modelConfig.lmstudioEndpoint || LMSTUDIO_DEFAULT_ENDPOINT);
+  const [isLoadingLmStudio, setIsLoadingLmStudio] = useState<boolean>(false);
+  const [lastFetchedLmStudioEndpoint, setLastFetchedLmStudioEndpoint] = useState<string>(modelConfig.lmstudioEndpoint || '');
+
   // Custom OpenAI state
   const [customOpenAIEndpoint, setCustomOpenAIEndpoint] = useState<string>(modelConfig.customOpenAIEndpoint || '');
   const [customOpenAIModel, setCustomOpenAIModel] = useState<string>(modelConfig.customOpenAIModel || '');
@@ -174,6 +186,7 @@ export function ModelSettingsModal({
 
   // Cache models by endpoint to avoid refetching when reverting endpoint changes
   const modelsCache = useRef<Map<string, OllamaModel[]>>(new Map());
+  const lmstudioModelsCache = useRef<Map<string, string[]>>(new Map());
 
   // URL validation helper
   const validateOllamaEndpoint = (url: string): boolean => {
@@ -225,6 +238,7 @@ export function ModelSettingsModal({
 
   const modelOptions: Record<string, string[]> = {
     ollama: models.map((model) => model.name),
+    lmstudio: lmstudioModels,
     claude: claudeModels.length > 0 ? claudeModels : CLAUDE_FALLBACK_MODELS,
     groq: groqModels.length > 0 ? groqModels : GROQ_FALLBACK_MODELS,
     openai: openaiModels.length > 0 ? openaiModels : OPENAI_FALLBACK_MODELS,
@@ -243,6 +257,10 @@ export function ModelSettingsModal({
   const ollamaEndpointChanged = modelConfig.provider === 'ollama' &&
     ollamaEndpoint.trim() !== lastFetchedEndpoint.trim();
 
+  // Check if LM Studio endpoint has changed but models haven't been fetched yet
+  const lmstudioEndpointChanged = modelConfig.provider === 'lmstudio' &&
+    lmstudioEndpoint.trim() !== lastFetchedLmStudioEndpoint.trim();
+
   // Custom OpenAI validation
   const isCustomOpenAIInvalid = modelConfig.provider === 'custom-openai' && (
     !customOpenAIEndpoint.trim() ||
@@ -252,6 +270,7 @@ export function ModelSettingsModal({
   const isDoneDisabled =
     (requiresApiKey && (!apiKey || (typeof apiKey === 'string' && !apiKey.trim()))) ||
     (modelConfig.provider === 'ollama' && ollamaEndpointChanged) ||
+    (modelConfig.provider === 'lmstudio' && lmstudioEndpointChanged) ||
     isCustomOpenAIInvalid;
 
   useEffect(() => {
@@ -268,7 +287,7 @@ export function ModelSettingsModal({
           setModelConfig(data);
 
           // Fetch API key if not included in response and provider requires it
-          if (data.provider !== 'ollama' && !data.apiKey) {
+          if (data.provider !== 'ollama' && data.provider !== 'lmstudio' && !data.apiKey) {
             try {
               const apiKeyData = await invoke('api_get_api_key', {
                 provider: data.provider
@@ -284,6 +303,12 @@ export function ModelSettingsModal({
           if (data.ollamaEndpoint) {
             setOllamaEndpoint(data.ollamaEndpoint);
             // Don't set lastFetchedEndpoint here - it will be set after successful model fetch
+          }
+
+          // Sync lmstudioEndpoint state with fetched config
+          if (data.lmstudioEndpoint) {
+            setLmstudioEndpoint(data.lmstudioEndpoint);
+            // Don't set lastFetchedLmStudioEndpoint here - it will be set after successful model fetch
           }
           hasLoadedInitialConfig.current = true; // Mark that initial config is loaded
 
@@ -379,6 +404,14 @@ export function ModelSettingsModal({
     }
   }, [modelConfig.provider]);
 
+  // Clear LM Studio models when switching away from LM Studio
+  useEffect(() => {
+    if (modelConfig.provider !== 'lmstudio') {
+      setLmstudioModels([]);
+      setLmstudioError('');
+    }
+  }, [modelConfig.provider]);
+
   // Handle endpoint changes - restore cached models or clear
   useEffect(() => {
     if (modelConfig.provider === 'ollama' &&
@@ -400,6 +433,25 @@ export function ModelSettingsModal({
       }
     }
   }, [ollamaEndpoint, lastFetchedEndpoint, modelConfig.provider]);
+
+  // Handle LM Studio endpoint changes - restore cached models or clear
+  useEffect(() => {
+    if (modelConfig.provider === 'lmstudio' &&
+      lmstudioEndpoint.trim() !== lastFetchedLmStudioEndpoint.trim()) {
+
+      const cachedModels = lmstudioModelsCache.current.get(lmstudioEndpoint.trim());
+
+      if (cachedModels && cachedModels.length > 0) {
+        // Avoid refetching over the network if this endpoint was already fetched
+        setLmstudioModels(cachedModels);
+        setLastFetchedLmStudioEndpoint(lmstudioEndpoint.trim());
+        setLmstudioError('');
+      } else {
+        setLmstudioModels([]);
+        setLmstudioError('');
+      }
+    }
+  }, [lmstudioEndpoint, lastFetchedLmStudioEndpoint, modelConfig.provider]);
 
   // Sync local apiKey state when provider changes
   useEffect(() => {
@@ -457,6 +509,42 @@ export function ModelSettingsModal({
       console.error('Error loading models:', err);
     } finally {
       setIsLoadingOllama(false);
+    }
+  };
+
+  // Manual fetch function for LM Studio models
+  const fetchLmStudioModels = async (silent = false) => {
+    const trimmedEndpoint = lmstudioEndpoint.trim();
+
+    if (trimmedEndpoint && !validateOllamaEndpoint(trimmedEndpoint)) {
+      const errorMsg = 'Invalid LM Studio endpoint URL. Must start with http:// or https://';
+      setLmstudioError(errorMsg);
+      if (!silent) {
+        toast.error(errorMsg);
+      }
+      return;
+    }
+
+    setIsLoadingLmStudio(true);
+    setLmstudioError('');
+
+    try {
+      const endpoint = trimmedEndpoint || null;
+      const modelList = (await invoke('api_get_lmstudio_models', { endpoint })) as string[];
+      setLmstudioModels(modelList);
+      setLastFetchedLmStudioEndpoint(trimmedEndpoint);
+
+      // Cache the fetched models for this endpoint
+      lmstudioModelsCache.current.set(trimmedEndpoint, modelList);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to load LM Studio models';
+      setLmstudioError(errorMsg);
+      if (!silent) {
+        toast.error(errorMsg);
+      }
+      console.error('Error loading LM Studio models:', err);
+    } finally {
+      setIsLoadingLmStudio(false);
     }
   };
 
@@ -612,7 +700,7 @@ export function ModelSettingsModal({
     if (cachedModel && providerModels.includes(cachedModel)) {
       setModelConfig((prev: ModelConfig) => ({ ...prev, model: cachedModel }));
     }
-  }, [models, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, modelConfig.provider]);
+  }, [models, lmstudioModels, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, modelConfig.provider]);
 
   const handleSave = async () => {
     // For custom-openai provider, save the custom config first
@@ -640,6 +728,9 @@ export function ModelSettingsModal({
       ollamaEndpoint: modelConfig.provider === 'ollama'
         ? (ollamaEndpoint.trim() || null)
         : (modelConfig.ollamaEndpoint || null),
+      lmstudioEndpoint: modelConfig.provider === 'lmstudio'
+        ? (lmstudioEndpoint.trim() || null)
+        : (modelConfig.lmstudioEndpoint || null),
       // Include custom OpenAI fields
       customOpenAIEndpoint: modelConfig.provider === 'custom-openai' ? customOpenAIEndpoint.trim() : null,
       customOpenAIModel: modelConfig.provider === 'custom-openai' ? customOpenAIModel.trim() : null,
@@ -853,6 +944,11 @@ export function ModelSettingsModal({
                   loadBuiltinAiModels();
                 }
 
+                // Auto-fetch LM Studio models when selected (if not already loaded)
+                if (provider === 'lmstudio' && lmstudioModels.length === 0) {
+                  fetchLmStudioModels(true);
+                }
+
                 // Load custom OpenAI config when selected
                 if (provider === 'custom-openai') {
                   invoke<any>('api_get_custom_openai_config').then((config) => {
@@ -878,6 +974,7 @@ export function ModelSettingsModal({
                 <SelectItem value="claude">Claude</SelectItem>
                 <SelectItem value="custom-openai">Custom Server (OpenAI)</SelectItem>
                 <SelectItem value="groq">Groq</SelectItem>
+                <SelectItem value="lmstudio">LM Studio</SelectItem>
                 <SelectItem value="ollama">Ollama</SelectItem>
                 <SelectItem value="openai">OpenAI</SelectItem>
                 <SelectItem value="openrouter">OpenRouter</SelectItem>
@@ -1353,6 +1450,117 @@ export function ModelSettingsModal({
                     })}
                   </div>
                 )}
+              </ScrollArea>
+            )}
+          </div>
+        )}
+
+        {modelConfig.provider === 'lmstudio' && (
+          <div>
+            <Label>LM Studio Endpoint</Label>
+            <p className="text-sm text-muted-foreground mt-1 mb-2">
+              Base URL of your local LM Studio server
+            </p>
+            <div className="flex gap-2 mt-1">
+              <div className="relative flex-1">
+                <Input
+                  type="url"
+                  value={lmstudioEndpoint}
+                  onChange={(e) => {
+                    setLmstudioEndpoint(e.target.value);
+                    // Clear models and errors when endpoint changes to avoid showing stale data
+                    if (e.target.value.trim() !== lastFetchedLmStudioEndpoint.trim()) {
+                      setLmstudioModels([]);
+                      setLmstudioError('');
+                    }
+                  }}
+                  placeholder={LMSTUDIO_DEFAULT_ENDPOINT}
+                />
+              </div>
+              <Button
+                type="button"
+                size={'sm'}
+                onClick={() => fetchLmStudioModels()}
+                disabled={isLoadingLmStudio}
+                variant="outline"
+                className="whitespace-nowrap"
+              >
+                {isLoadingLmStudio ? (
+                  <>
+                    <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                    Fetching...
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                    Fetch Models
+                  </>
+                )}
+              </Button>
+            </div>
+            {lmstudioEndpointChanged && !lmstudioError && (
+              <Alert className="mt-3 border-yellow-500 bg-yellow-50">
+                <AlertDescription className="text-yellow-800">
+                  Endpoint changed. Please click "Fetch Models" to load models from the new endpoint before saving.
+                </AlertDescription>
+              </Alert>
+            )}
+            {lmstudioError && (
+              <Alert className="mt-3 border-red-500 bg-red-50">
+                <AlertDescription className="text-red-800">
+                  {lmstudioError}
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
+        )}
+
+        {modelConfig.provider === 'lmstudio' && (
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="text-sm font-bold">Available LM Studio Models</h4>
+              {lastFetchedLmStudioEndpoint && lmstudioModels.length > 0 && (
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="text-muted-foreground">Using:</span>
+                  <code className="px-2 py-1 bg-muted rounded text-xs">
+                    {lastFetchedLmStudioEndpoint || LMSTUDIO_DEFAULT_ENDPOINT}
+                  </code>
+                </div>
+              )}
+            </div>
+            {isLoadingLmStudio ? (
+              <div className="text-center py-8 text-muted-foreground">
+                <RefreshCw className="mx-auto h-8 w-8 animate-spin mb-2" />
+                Loading models...
+              </div>
+            ) : lmstudioModels.length === 0 ? (
+              <Alert>
+                <AlertDescription>
+                  {lmstudioEndpointChanged
+                    ? 'Endpoint changed. Click "Fetch Models" to load models from the new endpoint.'
+                    : 'No models found. Make sure LM Studio is running with models loaded, then click "Fetch Models".'}
+                </AlertDescription>
+              </Alert>
+            ) : !lmstudioEndpointChanged && (
+              <ScrollArea className="max-h-[calc(100vh-450px)] overflow-y-auto pr-4">
+                <div className="grid gap-4">
+                  {lmstudioModels.map((modelId) => (
+                    <div
+                      key={modelId}
+                      className={cn(
+                        'bg-card p-2 m-0 rounded-md border transition-colors cursor-pointer',
+                        modelConfig.model === modelId
+                          ? 'ring-1 ring-blue-500 border-blue-500 background-blue-100'
+                          : 'hover:bg-muted/50'
+                      )}
+                      onClick={() =>
+                        setModelConfig((prev: ModelConfig) => ({ ...prev, model: modelId }))
+                      }
+                    >
+                      <b className="font-bold">{modelId}</b>
+                    </div>
+                  ))}
+                </div>
               </ScrollArea>
             )}
           </div>

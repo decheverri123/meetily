@@ -12,6 +12,8 @@ pub struct SaveModelConfigRequest {
     pub api_key: Option<String>,
     #[serde(rename = "ollamaEndpoint")]
     pub ollama_endpoint: Option<String>,
+    #[serde(rename = "lmstudioEndpoint")]
+    pub lmstudio_endpoint: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -44,23 +46,26 @@ impl SettingsRepository {
         model: &str,
         whisper_model: &str,
         ollama_endpoint: Option<&str>,
+        lmstudio_endpoint: Option<&str>,
     ) -> std::result::Result<(), sqlx::Error> {
         // Using id '1' for backward compatibility
         sqlx::query(
             r#"
-            INSERT INTO settings (id, provider, model, whisperModel, ollamaEndpoint)
-            VALUES ('1', $1, $2, $3, $4)
+            INSERT INTO settings (id, provider, model, whisperModel, ollamaEndpoint, lmstudioEndpoint)
+            VALUES ('1', $1, $2, $3, $4, $5)
             ON CONFLICT(id) DO UPDATE SET
                 provider = excluded.provider,
                 model = excluded.model,
                 whisperModel = excluded.whisperModel,
-                ollamaEndpoint = excluded.ollamaEndpoint
+                ollamaEndpoint = excluded.ollamaEndpoint,
+                lmstudioEndpoint = excluded.lmstudioEndpoint
             "#,
         )
         .bind(provider)
         .bind(model)
         .bind(whisper_model)
         .bind(ollama_endpoint)
+        .bind(lmstudio_endpoint)
         .execute(pool)
         .await?;
 
@@ -85,6 +90,7 @@ impl SettingsRepository {
             "ollama" => "ollamaApiKey",
             "groq" => "groqApiKey",
             "openrouter" => "openRouterApiKey",
+            "lmstudio" => return Ok(()), // No API key needed
             "builtin-ai" => return Ok(()), // No API key needed
             _ => {
                 return Err(sqlx::Error::Protocol(
@@ -123,6 +129,7 @@ impl SettingsRepository {
             "groq" => "groqApiKey",
             "claude" => "anthropicApiKey",
             "openrouter" => "openRouterApiKey",
+            "lmstudio" => return Ok(None), // No API key needed
             "builtin-ai" => return Ok(None), // No API key needed
             _ => {
                 return Err(sqlx::Error::Protocol(

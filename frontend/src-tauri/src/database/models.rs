@@ -92,6 +92,9 @@ pub struct Setting {
     #[sqlx(rename = "ollamaEndpoint")]
     #[serde(rename = "ollamaEndpoint")]
     pub ollama_endpoint: Option<String>,
+    #[sqlx(rename = "lmstudioEndpoint")]
+    #[serde(rename = "lmstudioEndpoint")]
+    pub lmstudio_endpoint: Option<String>,
     /// Custom OpenAI-compatible endpoint configuration stored as JSON
     #[sqlx(rename = "customOpenAIConfig")]
     #[serde(rename = "customOpenAIConfig")]

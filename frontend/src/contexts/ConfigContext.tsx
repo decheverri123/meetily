@@ -102,7 +102,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     provider: 'ollama',
     model: 'llama3.2:latest',
     whisperModel: 'large-v3',
-    ollamaEndpoint: null
+    ollamaEndpoint: null,
+    lmstudioEndpoint: null
   });
 
   // Transcript model configuration state
@@ -275,6 +276,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
             model: data.model || prev.model,
             whisperModel: data.whisperModel || prev.whisperModel,
             ollamaEndpoint: data.ollamaEndpoint,
+            lmstudioEndpoint: data.lmstudioEndpoint,
           }));
 
           // Seed per-provider model cache from DB
@@ -364,6 +366,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   // Calculate model options based on available models
   const modelOptions: Record<ModelConfig['provider'], string[]> = {
     ollama: models.map(model => model.name),
+    lmstudio: [],
     claude: ['claude-3-5-sonnet-latest'],
     groq: ['llama-3.3-70b-versatile'],
     openrouter: [],

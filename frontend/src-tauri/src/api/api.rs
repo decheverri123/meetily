@@ -76,6 +76,8 @@ pub struct ModelConfig {
     pub api_key: Option<String>,
     #[serde(rename = "ollamaEndpoint")]
     pub ollama_endpoint: Option<String>,
+    #[serde(rename = "lmstudioEndpoint")]
+    pub lmstudio_endpoint: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,6 +90,8 @@ pub struct SaveModelConfigRequest {
     pub api_key: Option<String>,
     #[serde(rename = "ollamaEndpoint")]
     pub ollama_endpoint: Option<String>,
+    #[serde(rename = "lmstudioEndpoint")]
+    pub lmstudio_endpoint: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -490,6 +494,7 @@ pub async fn api_get_model_config<R: Runtime>(
                         whisper_model: config.whisper_model,
                         api_key,
                         ollama_endpoint: config.ollama_endpoint,
+                        lmstudio_endpoint: config.lmstudio_endpoint,
                     }))
                 }
                 Err(e) => {
@@ -522,14 +527,16 @@ pub async fn api_save_model_config<R: Runtime>(
     whisper_model: String,
     api_key: Option<String>,
     ollama_endpoint: Option<String>,
+    lmstudio_endpoint: Option<String>,
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
-        "💾 api_save_model_config called (native): provider='{}', model='{}', whisperModel='{}', ollamaEndpoint={:?}",
+        "💾 api_save_model_config called (native): provider='{}', model='{}', whisperModel='{}', ollamaEndpoint={:?}, lmstudioEndpoint={:?}",
         &provider,
         &model,
         &whisper_model,
-        &ollama_endpoint
+        &ollama_endpoint,
+        &lmstudio_endpoint
     );
     let pool = state.db_manager.pool();
 
@@ -539,6 +546,7 @@ pub async fn api_save_model_config<R: Runtime>(
         &model,
         &whisper_model,
         ollama_endpoint.as_deref(),
+        lmstudio_endpoint.as_deref(),
     )
     .await
     {
@@ -1380,4 +1388,11 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
             }
         }
     }
+}
+
+#[tauri::command]
+pub async fn api_get_lmstudio_models(endpoint: Option<String>) -> Result<Vec<String>, String> {
+    crate::lmstudio::get_lmstudio_models(endpoint)
+        .await
+        .map_err(|e| e.to_string())
 }
