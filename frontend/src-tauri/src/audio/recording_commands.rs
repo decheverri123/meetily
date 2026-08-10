@@ -32,11 +32,13 @@ use super::transcription::{
 // Re-export TranscriptUpdate for backward compatibility
 pub use super::transcription::TranscriptUpdate;
 
-// Used by the live insights feature below (kept as a single hoisted import
-// rather than inline fully-qualified paths mid-function).
+// Used by the live insights / action chips features below (kept as a single
+// hoisted import rather than inline fully-qualified paths mid-function).
 use crate::summary::summary_engine::{
-    builtin_ai_get_available_summary_model, generate_with_builtin, ModelManagerState,
+    builtin_ai_get_available_summary_model, builtin_ai_is_model_ready, generate_with_builtin,
+    ModelManagerState,
 };
+use crate::summary::llm_client::{generate_summary, provider_name, LLMProvider};
 
 // ============================================================================
 // GLOBAL STATE
@@ -52,17 +54,23 @@ static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 // Listener ID for proper cleanup - prevents microphone from staying active after recording stops
 static TRANSCRIPT_LISTENER_ID: Mutex<Option<tauri::EventId>> = Mutex::new(None);
 
-// Guards concurrent calls to `generate_live_insights` - the frontend polls this
-// command periodically, and we want to skip a tick rather than queue up work
-// if a previous local-LLM generation is still running.
+// Guards concurrent calls to `generate_live_insights` AND `generate_live_action_chip`
+// - both ultimately drive the same single-flight LLM call, so they share this
+// one flag (see `LiveInsightsGuard`'s doc comment). `generate_live_insights` is
+// polled periodically by the frontend and wants to skip a tick rather than
+// queue up work if a previous generation is still running; chips reuse the
+// same guard so a click can't race a poll (or another chip click) on it.
 static LIVE_INSIGHTS_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 // Timestamp of the last accepted `generate_live_insights` call, used for the
-// backend-enforced minimum-interval check below.
+// backend-enforced minimum-interval check below. `generate_live_action_chip`
+// rate-limits independently via its own per-kind statics
+// (`LIVE_ACTION_CHIP_RECAP_LAST_CALL` / `LIVE_ACTION_CHIP_QUESTIONS_LAST_CALL`).
 static LIVE_INSIGHTS_LAST_CALL: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
-// Cache of the resolved builtin summary model name for `generate_live_insights`
-// (see `LIVE_INSIGHTS_MODEL_CACHE_TTL`).
+// Cache of the resolved builtin summary model name, shared by the BuiltInAI
+// route of `generate_bounded_live_llm_text` for both `generate_live_insights`
+// and `generate_live_action_chip` (see `LIVE_INSIGHTS_MODEL_CACHE_TTL`).
 static LIVE_INSIGHTS_MODEL_CACHE: Mutex<Option<(Option<String>, std::time::Instant)>> =
     Mutex::new(None);
 
@@ -1249,7 +1257,8 @@ pub async fn attempt_device_reconnect(
 // ============================================================================
 
 /// Maximum number of Unicode characters (not bytes) of transcript to send to
-/// the local LLM per call. Counting by `.chars().count()` rather than
+/// the LLM per call (the configured builtin/local model, or a remote provider
+/// - see `resolve_live_llm_provider`). Counting by `.chars().count()` rather than
 /// `.len()` matters here - `.len()` counts UTF-8 bytes, which would silently
 /// shrink the effective window for non-Latin transcripts (e.g. a CJK
 /// character is 3 bytes but 1 char).
@@ -1261,25 +1270,29 @@ const LIVE_INSIGHTS_MAX_CHARS: usize = 6000;
 const LIVE_INSIGHTS_MIN_CHARS: usize = 50;
 
 /// Minimum interval enforced between successive `generate_live_insights`
-/// calls. This is defense-in-depth against a buggy/runaway frontend polling
-/// loop, not a fix for an actual vulnerability - the app is local/single-user.
-/// It just bounds worst-case load on the local LLM sidecar if the intended
-/// ~45s polling cadence were ever violated.
+/// calls (and, via `live_action_chip_last_call_static`'s own per-kind
+/// statics, `generate_live_action_chip` calls of each kind). This is
+/// defense-in-depth against a buggy/runaway frontend polling loop, not a fix
+/// for an actual vulnerability - the app is local/single-user. It just bounds
+/// worst-case load on the local LLM sidecar - or a configured remote
+/// provider's API - if the intended cadence were ever violated.
 const LIVE_INSIGHTS_MIN_CALL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long a resolved builtin summary model name stays cached before
-/// `generate_live_insights` re-scans the models directory via
+/// `resolve_cached_live_insights_model` re-scans the models directory via
 /// `builtin_ai_get_available_summary_model`. Live insights are polled every
-/// ~45s while a meeting is active, so without this cache every poll pays for
-/// a filesystem `scan_models()` walk. A short TTL (vs. caching indefinitely)
+/// ~45s while a meeting is active, so without this cache every poll (plus
+/// every action-chip click, which shares this same cache) pays for a
+/// filesystem `scan_models()` walk. A short TTL (vs. caching indefinitely)
 /// means a model added/removed mid-meeting is still picked up within a few
 /// minutes rather than requiring an app restart - this cache only affects
-/// model selection for the live-insights convenience feature, not the
+/// model selection for the live-insights/chips convenience features, not the
 /// canonical model-selection source of truth used elsewhere.
 const LIVE_INSIGHTS_MODEL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Error returned when `LiveInsightsGuard` fails to claim because a previous
-/// `generate_live_insights` call is still running.
+/// `generate_live_insights` or `generate_live_action_chip` call is still
+/// running.
 ///
 /// IMPORTANT: `frontend/src/hooks/useLiveInsights.ts` has a matching TS
 /// constant that MUST use this exact same string value - the frontend
@@ -1287,17 +1300,18 @@ const LIVE_INSIGHTS_MODEL_CACHE_TTL: std::time::Duration = std::time::Duration::
 pub(crate) const LIVE_INSIGHTS_IN_PROGRESS_ERROR: &str = "insights generation already in progress";
 
 /// Error returned by the backend-enforced minimum-interval check when
-/// `generate_live_insights` is called again too soon after the previous call
-/// (see `LIVE_INSIGHTS_MIN_CALL_INTERVAL`).
+/// `generate_live_insights` or `generate_live_action_chip` is called again
+/// too soon after the previous call (see `LIVE_INSIGHTS_MIN_CALL_INTERVAL`).
 pub(crate) const LIVE_INSIGHTS_RATE_LIMITED_ERROR: &str =
     "insights generation requested too soon - please retry shortly";
 
-/// Local timeout for a single `generate_live_insights` call, deliberately much
-/// shorter than the shared `summary::summary_engine::models::GENERATION_TIMEOUT_SECS`
-/// (900s) used by the post-meeting summary pipeline. That constant is left
+/// Local timeout for a single `generate_live_insights` or
+/// `generate_live_action_chip` call, deliberately much shorter than the
+/// shared `summary::summary_engine::models::GENERATION_TIMEOUT_SECS` (900s)
+/// used by the post-meeting summary pipeline. That constant is left
 /// untouched - it's out of scope and other long-meeting summaries rely on the
-/// full budget. Live insights are just polled again on the next tick if this
-/// is hit, so a short local timeout is safe and keeps the panel responsive.
+/// full budget. Live insights/chips are just retried on the next poll/click if
+/// this is hit, so a short local timeout is safe and keeps the UI responsive.
 ///
 /// This is enforced via a `CancellationToken` passed into `generate_with_builtin`
 /// rather than a bare `tokio::time::timeout` wrapper. `generate_with_builtin`
@@ -1383,6 +1397,33 @@ fn build_recent_window(
     selected.join("\n")
 }
 
+/// Shown instead of a raw sidecar/llama.cpp error string when the builtin AI
+/// model backing live insights/action chips turns out to be missing or
+/// corrupted - e.g. a real user hit the raw sidecar message "Generation
+/// failed: Failed to load model: unable to load model at
+/// '.../Qwen3.5-4B-Q4_K_M.gguf'", which is meaningless to a non-technical
+/// user and gives no actionable next step. Mirrors the distinct not-
+/// downloaded/downloading/corrupted messaging
+/// `SummaryGeneratorButtonGroup.checkBuiltInAIModelsAndGenerate` already shows
+/// for this same class of failure in the post-meeting summary flow, collapsed
+/// into one message here since live insights/chips have far less UI real
+/// estate than that flow's toast+modal combo.
+const LIVE_LLM_MODEL_UNAVAILABLE_ERROR: &str = "The builtin AI model appears to be missing or \
+corrupted — open Settings → Model Settings to re-download it.";
+
+/// Whether an error message returned by the sidecar looks like a model-load
+/// failure (missing/corrupted model file) rather than a transient failure
+/// (rate limit, cancellation/timeout, in-progress) that already has its own
+/// sentinel handling elsewhere. Used by `map_generation_outcome` as a
+/// reactive fallback for the case where the sidecar's own load fails despite
+/// the proactive `builtin_ai_is_model_ready` check in
+/// `generate_bounded_live_llm_text` having passed moments earlier (e.g. the
+/// model file was deleted/corrupted in the gap between the two).
+fn is_model_load_failure(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("unable to load model") || lower.contains("failed to load model")
+}
+
 /// Maps a generation outcome (the raw `Result` from `generate_with_builtin`
 /// plus whether the shared cancellation token ended up cancelled) to the
 /// final `Result<String, String>` returned by `generate_live_insights`.
@@ -1398,7 +1439,14 @@ fn map_generation_outcome(
         Err(_e) if was_cancelled => {
             Err("Live insights generation timed out — will retry on the next update".to_string())
         }
-        Err(e) => Err(e.to_string()),
+        Err(e) => {
+            let message = e.to_string();
+            if is_model_load_failure(&message) {
+                Err(LIVE_LLM_MODEL_UNAVAILABLE_ERROR.to_string())
+            } else {
+                Err(message)
+            }
+        }
     }
 }
 
@@ -1446,6 +1494,152 @@ fn is_rate_limited(
     }
 }
 
+/// Rejects with `LIVE_INSIGHTS_RATE_LIMITED_ERROR` if `last_call` was set too
+/// recently. Deliberately does NOT stamp `last_call` itself - see
+/// `commit_rate_limit_slot` below, which callers must invoke separately once
+/// they know the call is actually going to run. Splitting "check" from
+/// "commit" like this (rather than stamping here unconditionally on success)
+/// is what lets a caller that passes this check but then loses the
+/// `LiveInsightsGuard` single-flight race avoid burning the rate-limit
+/// window for a call that never actually generated anything.
+///
+/// Shared by `generate_live_insights` and `generate_live_action_chip`, each
+/// passing their own `last_call` static so the commands rate-limit
+/// independently (see `LIVE_ACTION_CHIP_RECAP_LAST_CALL` for why the
+/// timestamps aren't shared even though the interval is - including between
+/// the two chip kinds themselves).
+fn claim_rate_limit_slot(
+    last_call: &Mutex<Option<std::time::Instant>>,
+    min_interval: std::time::Duration,
+) -> Result<(), String> {
+    let last_call = last_call.lock().unwrap();
+    if is_rate_limited(*last_call, min_interval) {
+        return Err(LIVE_INSIGHTS_RATE_LIMITED_ERROR.to_string());
+    }
+    Ok(())
+}
+
+/// Stamps `last_call` with `Instant::now()`, marking a rate-limit window as
+/// consumed. Callers must only invoke this *after* `claim_rate_limit_slot`
+/// has passed AND `LiveInsightsGuard::try_claim()` has actually succeeded -
+/// committing any earlier (e.g. right after `claim_rate_limit_slot` alone)
+/// would burn the window even for a call that goes on to lose the guard race
+/// and never generates anything.
+fn commit_rate_limit_slot(last_call: &Mutex<Option<std::time::Instant>>) {
+    *last_call.lock().unwrap() = Some(std::time::Instant::now());
+}
+
+/// Determines which `LLMProvider` `generate_bounded_live_llm_text` should use,
+/// given the raw `provider` string from the user's saved model config (or
+/// `None` if no config row exists yet, or the lookup itself failed). Pulled
+/// out into its own pure function - mirroring `live_action_chip_last_call_static`
+/// / `is_model_load_failure` elsewhere in this file - so this branch point is
+/// unit-testable without a `ModelConfig`/`AppHandle`.
+///
+/// Falls back to `LLMProvider::BuiltInAI` for `None`, an unparseable provider
+/// string, or (by construction, since callers pass `.ok().flatten()` results
+/// from `api_get_model_config`) a failed config lookup - preserving the
+/// pre-existing "always use the local sidecar" behavior as the safe default
+/// whenever the user hasn't (successfully) configured anything else.
+fn resolve_live_llm_provider(provider_str: Option<&str>) -> LLMProvider {
+    provider_str
+        .and_then(|s| LLMProvider::from_str(s).ok())
+        .unwrap_or(LLMProvider::BuiltInAI)
+}
+
+/// A resolved plan for calling a configured *non-builtin* summary provider
+/// from `generate_bounded_live_llm_text`, produced by
+/// `resolve_provider_invocation`. Kept separate from the `LLMProvider` enum
+/// itself since it also carries the provider-specific connection details
+/// (endpoint, credentials, CustomOpenAI generation params) that
+/// `llm_client::generate_summary` needs.
+#[derive(Debug, PartialEq)]
+struct LiveLlmProviderInvocation {
+    provider: LLMProvider,
+    model_name: String,
+    api_key: String,
+    ollama_endpoint: Option<String>,
+    custom_openai_endpoint: Option<String>,
+    custom_openai_max_tokens: Option<u32>,
+    custom_openai_temperature: Option<f32>,
+    custom_openai_top_p: Option<f32>,
+}
+
+/// Resolves how to call a configured non-builtin summary `provider`, mirroring
+/// the same provider-driven branching `SummaryService::process_transcript_background`
+/// (`summary/service.rs`) already uses for the post-meeting summary pipeline:
+/// `Ollama` needs no API key (just an optional custom endpoint), `CustomOpenAI`
+/// is configured entirely separately (its own endpoint/key/generation params,
+/// stored as JSON - see `custom_openai_config`), and every other provider
+/// requires a non-empty API key from `api_key`.
+///
+/// A pure function deliberately: `custom_openai_config` must be fetched by the
+/// caller beforehand (it's async/DB-backed), so this branching logic itself
+/// stays unit-testable without any `AppHandle`/DB access. Must not be called
+/// with `provider == LLMProvider::BuiltInAI` - that path is handled entirely
+/// separately by `generate_bounded_live_llm_text` to keep the existing builtin
+/// behavior (cached model resolution + readiness check) untouched.
+fn resolve_provider_invocation(
+    provider: &LLMProvider,
+    model_name: &str,
+    api_key: Option<&str>,
+    ollama_endpoint: Option<&str>,
+    custom_openai_config: Option<&crate::summary::CustomOpenAIConfig>,
+) -> Result<LiveLlmProviderInvocation, String> {
+    match provider {
+        LLMProvider::BuiltInAI => unreachable!(
+            "resolve_provider_invocation must not be called for LLMProvider::BuiltInAI - \
+             generate_bounded_live_llm_text handles that path separately"
+        ),
+        LLMProvider::Ollama => Ok(LiveLlmProviderInvocation {
+            provider: provider.clone(),
+            model_name: model_name.to_string(),
+            api_key: String::new(),
+            ollama_endpoint: ollama_endpoint.map(str::to_string),
+            custom_openai_endpoint: None,
+            custom_openai_max_tokens: None,
+            custom_openai_temperature: None,
+            custom_openai_top_p: None,
+        }),
+        LLMProvider::CustomOpenAI => {
+            let config = custom_openai_config.ok_or_else(|| {
+                "Custom OpenAI provider selected but no endpoint configured — add one in \
+                 Settings → Model Settings."
+                    .to_string()
+            })?;
+            Ok(LiveLlmProviderInvocation {
+                provider: provider.clone(),
+                model_name: model_name.to_string(),
+                api_key: config.api_key.clone().unwrap_or_default(),
+                ollama_endpoint: None,
+                custom_openai_endpoint: Some(config.endpoint.clone()),
+                custom_openai_max_tokens: config.max_tokens.map(|t| t.max(0) as u32),
+                custom_openai_temperature: config.temperature,
+                custom_openai_top_p: config.top_p,
+            })
+        }
+        other => {
+            let key = api_key.map(str::trim).filter(|k| !k.is_empty());
+            match key {
+                Some(key) => Ok(LiveLlmProviderInvocation {
+                    provider: other.clone(),
+                    model_name: model_name.to_string(),
+                    api_key: key.to_string(),
+                    ollama_endpoint: None,
+                    custom_openai_endpoint: None,
+                    custom_openai_max_tokens: None,
+                    custom_openai_temperature: None,
+                    custom_openai_top_p: None,
+                }),
+                None => Err(format!(
+                    "No API key configured for {} — add it in Settings → Model Settings.",
+                    provider_name(other)
+                )),
+            }
+        }
+    }
+}
+
 /// Generate a lightweight running summary + action items from the transcript
 /// accumulated so far during an ACTIVE recording, using the app's local
 /// builtin LLM (llama-helper sidecar). Reads the transcript-so-far itself via
@@ -1461,17 +1655,45 @@ fn is_rate_limited(
 /// - `Err(...)` for other failures (e.g. no builtin model configured/ready)
 #[tauri::command]
 pub async fn generate_live_insights(app: tauri::AppHandle) -> Result<String, String> {
-    {
-        let mut last_call = LIVE_INSIGHTS_LAST_CALL.lock().unwrap();
-        if is_rate_limited(*last_call, LIVE_INSIGHTS_MIN_CALL_INTERVAL) {
-            return Err(LIVE_INSIGHTS_RATE_LIMITED_ERROR.to_string());
-        }
-        *last_call = Some(std::time::Instant::now());
-    }
+    claim_rate_limit_slot(&LIVE_INSIGHTS_LAST_CALL, LIVE_INSIGHTS_MIN_CALL_INTERVAL)?;
 
     let _guard = LiveInsightsGuard::try_claim()
         .ok_or_else(|| LIVE_INSIGHTS_IN_PROGRESS_ERROR.to_string())?;
+    commit_rate_limit_slot(&LIVE_INSIGHTS_LAST_CALL);
 
+    generate_bounded_live_llm_text(&app, LIVE_INSIGHTS_SYSTEM_PROMPT).await
+}
+
+/// Shared implementation behind both `generate_live_insights` and
+/// `generate_live_action_chip`: reads the transcript-so-far, builds the
+/// bounded recent window, resolves the user's *configured summary provider*
+/// (via `api_get_model_config` - the same lookup `stop_recording`'s analytics
+/// call already uses at this file's `summary_config` call site), and
+/// generates `system_prompt` against it. Callers are responsible for their
+/// own rate-limit check and for holding `LiveInsightsGuard` before calling
+/// this - it does not claim the guard itself, since callers need to validate
+/// their own arguments (e.g. `kind`) before deciding whether to consume a
+/// rate-limit slot/guard claim at all.
+///
+/// Routing:
+/// - `LLMProvider::BuiltInAI` (including no config / an unparseable provider
+///   string - see `resolve_live_llm_provider`): unchanged pre-existing
+///   behavior - resolves the cached builtin model, confirms it's ready, and
+///   calls the local llama-helper sidecar via `generate_with_builtin`.
+/// - Any other configured provider: validates an API key is present where
+///   required (see `resolve_provider_invocation`) and makes a single
+///   non-chunked call via `llm_client::generate_summary` - the same one-shot
+///   call the post-meeting summary pipeline uses per-chunk, just called once
+///   here against the bounded transcript window instead of looping.
+///
+/// Both routes share the same 60s `CancellationToken`-based timeout wrapper
+/// below - it is *not* duplicated per-route, since building a second, looser
+/// timeout mechanism for the provider path would defeat the reason this one
+/// exists in the first place (see `LIVE_INSIGHTS_GENERATION_TIMEOUT_SECS`).
+async fn generate_bounded_live_llm_text(
+    app: &tauri::AppHandle,
+    system_prompt: &str,
+) -> Result<String, String> {
     let segments = {
         let manager_guard = RECORDING_MANAGER.lock().unwrap();
         match manager_guard.as_ref() {
@@ -1485,13 +1707,6 @@ pub async fn generate_live_insights(app: tauri::AppHandle) -> Result<String, Str
         return Ok(String::new());
     }
 
-    let model_name = resolve_cached_live_insights_model(&app)
-        .await?
-        .ok_or_else(|| {
-            "No local model configured or ready — configure a builtin AI model in Settings"
-                .to_string()
-        })?;
-
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -1499,12 +1714,103 @@ pub async fn generate_live_insights(app: tauri::AppHandle) -> Result<String, Str
 
     let user_prompt = format!("Transcript so far:\n\n{}", window);
 
-    // Live insights are polled frequently and shown while the meeting is still
-    // running, so we cap generation to a much shorter budget than the shared
-    // `GENERATION_TIMEOUT_SECS` (900s) used by the post-meeting summary
-    // pipeline - that constant stays untouched since long meetings legitimately
-    // need the full 15 minutes there. Here, a slow generation just means we
-    // skip this tick and retry on the next poll.
+    // Same lookup (and call pattern) `stop_recording`'s analytics tracking
+    // already uses to read the user's configured summary provider server-side
+    // - a failed/missing lookup falls back to `None`, which
+    // `resolve_live_llm_provider` treats as BuiltInAI (the pre-existing
+    // default behavior).
+    let model_config = crate::api::api::api_get_model_config(app.clone(), app.clone().state(), None)
+        .await
+        .ok()
+        .flatten();
+
+    let provider =
+        resolve_live_llm_provider(model_config.as_ref().map(|c| c.provider.as_str()));
+
+    /// Which call `generate_bounded_live_llm_text` will make once the shared
+    /// timeout wrapper below is set up. Resolved *before* that wrapper so
+    /// pre-flight validation failures (no model configured, model not ready,
+    /// no API key, no CustomOpenAI endpoint) return immediately without ever
+    /// spinning up the cancellation timer - mirroring how the pre-existing
+    /// builtin checks already worked.
+    enum Plan {
+        Builtin { model_name: String },
+        Provider(LiveLlmProviderInvocation),
+    }
+
+    let plan = if provider == LLMProvider::BuiltInAI {
+        let model_name = resolve_cached_live_insights_model(app)
+            .await?
+            .ok_or_else(|| {
+                "No local model configured or ready — configure a builtin AI model in Settings"
+                    .to_string()
+            })?;
+
+        // Proactively confirm the resolved model is actually ready before
+        // paying for a sidecar round-trip, reusing the same underlying
+        // readiness check (`ModelManager::is_model_ready`, via the
+        // `builtin_ai_is_model_ready` Tauri command) that
+        // `SummaryGeneratorButtonGroup` already uses for the equivalent
+        // pre-flight check in the post-meeting summary flow - rather than
+        // reinventing a second readiness check here. Deliberately does NOT
+        // pass `refresh: true` (unlike that flow's call): `model_name` was
+        // just resolved via `resolve_cached_live_insights_model`'s cache,
+        // which is exactly what avoids rescanning the models directory on
+        // every live-insights poll (see `LIVE_INSIGHTS_MODEL_CACHE_TTL`) -
+        // forcing a refresh here on every call/poll would defeat that. This
+        // still catches the common "model missing/corrupted" case via the
+        // manager's in-memory status, and `map_generation_outcome` below is
+        // the reactive backstop for the rarer case where the sidecar's own
+        // load fails anyway (e.g. a race between this check and the actual
+        // load).
+        let is_ready = builtin_ai_is_model_ready(
+            app.clone(),
+            app.state::<ModelManagerState>(),
+            model_name.clone(),
+            None,
+        )
+        .await?;
+        if !is_ready {
+            return Err(LIVE_LLM_MODEL_UNAVAILABLE_ERROR.to_string());
+        }
+
+        Plan::Builtin { model_name }
+    } else {
+        // `provider != BuiltInAI` here only happens when `model_config` parsed
+        // to a non-builtin provider, which is only possible if `model_config`
+        // itself was `Some` (see `resolve_live_llm_provider`).
+        let config = model_config
+            .expect("non-builtin provider implies a loaded ModelConfig");
+
+        // CustomOpenAI's endpoint/key/generation params live in their own
+        // JSON-backed settings row, not on `ModelConfig` - only fetch it when
+        // actually needed, mirroring `SummaryService::process_transcript_background`.
+        let custom_openai_config = if provider == LLMProvider::CustomOpenAI {
+            crate::api::api::api_get_custom_openai_config(app.clone(), app.clone().state())
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
+        let invocation = resolve_provider_invocation(
+            &provider,
+            &config.model,
+            config.api_key.as_deref(),
+            config.ollama_endpoint.as_deref(),
+            custom_openai_config.as_ref(),
+        )?;
+
+        Plan::Provider(invocation)
+    };
+
+    // Live insights/chips are polled or clicked frequently and shown while the
+    // meeting is still running, so we cap generation to a much shorter budget
+    // than the shared `GENERATION_TIMEOUT_SECS` (900s) used by the
+    // post-meeting summary pipeline - that constant stays untouched since long
+    // meetings legitimately need the full 15 minutes there. Here, a slow
+    // generation just means the caller retries on the next poll/click.
     //
     // Deliberately NOT a bare `tokio::time::timeout(...)` around the call: see
     // the doc comment on `LIVE_INSIGHTS_GENERATION_TIMEOUT_SECS` for why that's
@@ -1513,6 +1819,9 @@ pub async fn generate_live_insights(app: tauri::AppHandle) -> Result<String, Str
     // `generate_with_builtin`'s own `tokio::select!` cancellation arm - that
     // arm shuts the sidecar down cleanly before returning, so the shared
     // stdin/stdout pipe can never be left desynced for a later caller.
+    // `llm_client::generate_summary` honors the same token for non-builtin
+    // providers (it's a plain HTTP call, so cancellation there is just
+    // dropping the in-flight request - no shared-pipe desync risk).
     let cancellation_token = CancellationToken::new();
     let timeout_token = cancellation_token.clone();
     let timeout_task: JoinHandle<()> = tokio::spawn(async move {
@@ -1523,27 +1832,192 @@ pub async fn generate_live_insights(app: tauri::AppHandle) -> Result<String, Str
         timeout_token.cancel();
     });
 
-    let result = generate_with_builtin(
-        &app_data_dir,
-        &model_name,
-        LIVE_INSIGHTS_SYSTEM_PROMPT,
-        &user_prompt,
-        Some(&cancellation_token),
-    )
-    .await;
+    let result: Result<String, String> = match plan {
+        Plan::Builtin { model_name } => generate_with_builtin(
+            &app_data_dir,
+            &model_name,
+            system_prompt,
+            &user_prompt,
+            Some(&cancellation_token),
+        )
+        .await
+        .map_err(|e| e.to_string()),
+        Plan::Provider(invocation) => {
+            let client = reqwest::Client::new();
+            generate_summary(
+                &client,
+                &invocation.provider,
+                &invocation.model_name,
+                &invocation.api_key,
+                system_prompt,
+                &user_prompt,
+                invocation.ollama_endpoint.as_deref(),
+                invocation.custom_openai_endpoint.as_deref(),
+                invocation.custom_openai_max_tokens,
+                invocation.custom_openai_temperature,
+                invocation.custom_openai_top_p,
+                Some(&app_data_dir),
+                Some(&cancellation_token),
+            )
+            .await
+        }
+    };
 
-    // The timer task is only useful until `generate_with_builtin` returns -
-    // abort it now so a fast (successful or failed) generation doesn't leave a
+    // The timer task is only useful until the call above returns - abort it
+    // now so a fast (successful or failed) generation doesn't leave a
     // dangling 60s sleep task running in the background.
     timeout_task.abort();
 
     map_generation_outcome(result, cancellation_token.is_cancelled())
 }
 
+// ============================================================================
+// LIVE ACTION CHIPS (short, on-demand "recap" / "questions" suggestions)
+//
+// Distinct from `generate_live_insights` above: these are short, user-
+// triggered (e.g. by clicking a chip button), single-purpose generations
+// rather than a periodically-polled running summary. They reuse the same
+// transcript windowing, cached model resolution, and sidecar call as live
+// insights - see the design note on `LiveInsightsGuard` below for why they
+// also share its single-flight lock.
+// ============================================================================
+
+/// System prompt for the "recap" live action chip. Deliberately much terser
+/// than `LIVE_INSIGHTS_SYSTEM_PROMPT` - this is quick-glance chip/tooltip
+/// copy, not a running summary with an action-items section.
+const LIVE_ACTION_CHIP_RECAP_PROMPT: &str = "You are assisting with a meeting that is still in progress. \
+Given the transcript so far, write an extremely short recap - 1 to 3 sentences, plain prose, no heading, no \
+bullet points - of what's been discussed so far. This is quick-glance chip copy meant to be read in a couple \
+of seconds, not a running summary, so be as terse as possible while still being useful. Markdown is fine but \
+keep formatting minimal.";
+
+const LIVE_ACTION_CHIP_QUESTIONS_PROMPT: &str = "You are assisting with a meeting that is still in progress. \
+Given the transcript so far, suggest 2 to 3 short, concrete clarifying or follow-up questions the user could \
+ask next. Return ONLY a markdown bullet list of the questions - no heading, no preamble, no numbering beyond \
+the bullets themselves. Each question should be a single short sentence.";
+
+/// Maps a chip `kind` to its system prompt, or an error naming the invalid
+/// kind. That error is not a sentinel the frontend needs to pattern-match on
+/// (unlike the in-progress/rate-limit errors) - it only fires for a
+/// programmer error on the calling side, since the frontend is expected to
+/// only ever pass `"recap"` or `"questions"`.
+fn live_action_chip_system_prompt(kind: &str) -> Result<&'static str, String> {
+    match kind {
+        "recap" => Ok(LIVE_ACTION_CHIP_RECAP_PROMPT),
+        "questions" => Ok(LIVE_ACTION_CHIP_QUESTIONS_PROMPT),
+        other => Err(format!(
+            "Invalid live action chip kind: '{}' (expected \"recap\" or \"questions\")",
+            other
+        )),
+    }
+}
+
+/// Timestamps of the last accepted `generate_live_action_chip` call, kept
+/// *per chip kind* rather than as one shared timestamp for both "recap" and
+/// "questions".
+///
+/// Deliberately separate from `LIVE_INSIGHTS_LAST_CALL` too, even though all
+/// three (`LIVE_INSIGHTS_LAST_CALL` and these two) reuse the same
+/// `LIVE_INSIGHTS_MIN_CALL_INTERVAL` value and the same
+/// `LIVE_INSIGHTS_RATE_LIMITED_ERROR` sentinel: `generate_live_insights` is
+/// driven by a background ~45s poll loop, while chips are triggered
+/// on-demand by an explicit user click. Sharing a timestamp across any of
+/// these would let one incorrectly rate-limit another even though they're
+/// logically independent user-facing actions.
+///
+/// The "recap" and "questions" chips in particular are two separately
+/// rendered buttons with fully independent UI/loading state - a user can
+/// click "Recap" (which resolves quickly) and then immediately click
+/// "Questions" for the very first time. With a single shared timestamp, that
+/// "questions" click would be wrongly rejected as rate-limited for a chip it
+/// never touched. Two known kinds only, so two plain statics (rather than a
+/// `HashMap`) match the existing single-static style used throughout this
+/// file. Only the *single-flight guard* (`LiveInsightsGuard`) needs to stay
+/// shared across all of these - that's what actually protects the one shared
+/// sidecar process from concurrent requests; see its doc comment.
+static LIVE_ACTION_CHIP_RECAP_LAST_CALL: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static LIVE_ACTION_CHIP_QUESTIONS_LAST_CALL: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Selects the per-kind rate-limit timestamp static for a given chip `kind`.
+/// Pulled out into its own function so the "recap"/"questions" -> static
+/// mapping can be unit tested directly, mirroring `live_action_chip_system_prompt`.
+///
+/// The fallback arm is unreachable in practice: `generate_live_action_chip`
+/// always calls `live_action_chip_system_prompt(&kind)?` first, which already
+/// rejects any `kind` other than `"recap"`/`"questions"` before this function
+/// is ever reached.
+fn live_action_chip_last_call_static(kind: &str) -> &'static Mutex<Option<std::time::Instant>> {
+    match kind {
+        "questions" => &LIVE_ACTION_CHIP_QUESTIONS_LAST_CALL,
+        _ => &LIVE_ACTION_CHIP_RECAP_LAST_CALL,
+    }
+}
+
+/// Generate short, actionable suggestion-chip content from the transcript
+/// accumulated so far during an ACTIVE recording, using the same local
+/// builtin LLM (llama-helper sidecar) as `generate_live_insights`.
+///
+/// `kind` must be `"recap"` (a very short 1-3 sentence recap, phrased for a
+/// chip/tooltip - terser than `generate_live_insights`' running summary) or
+/// `"questions"` (a markdown bullet list of 2-3 short clarifying/follow-up
+/// questions).
+///
+/// Deliberately shares `LiveInsightsGuard` - and therefore
+/// `LIVE_INSIGHTS_IN_PROGRESS_ERROR` - with `generate_live_insights` rather
+/// than using an independent lock. Both commands ultimately call
+/// `generate_with_builtin` against the same single llama-helper sidecar
+/// process (see the doc comment on `LIVE_INSIGHTS_GENERATION_TIMEOUT_SECS`
+/// for why that shared pipe requires strict one-request-in-flight ordering).
+/// A second, independent lock scoped only to chip generation would not
+/// prevent a chip call and an insights poll from racing against each other
+/// on that shared pipe, so the two commands must contend for the *same* lock.
+///
+/// Returns:
+/// - `Ok(markdown)` with the requested chip content
+/// - `Ok("")` if there's no active recording or not enough transcript yet
+/// - `Err(...)` with a message naming the invalid kind if `kind` is neither
+///   `"recap"` nor `"questions"`
+/// - `Err(LIVE_INSIGHTS_IN_PROGRESS_ERROR)` if a `generate_live_insights` or
+///   `generate_live_action_chip` call is still running
+/// - `Err(LIVE_INSIGHTS_RATE_LIMITED_ERROR)` if called again within
+///   `LIVE_INSIGHTS_MIN_CALL_INTERVAL` of the previous accepted
+///   `generate_live_action_chip` call
+/// - `Err(...)` for other failures (e.g. no builtin model configured/ready)
+#[tauri::command]
+pub async fn generate_live_action_chip(
+    app: tauri::AppHandle,
+    kind: String,
+) -> Result<String, String> {
+    // Validate first, before touching the rate limiter or the shared guard -
+    // an invalid `kind` shouldn't consume either.
+    let system_prompt = live_action_chip_system_prompt(&kind)?;
+    let last_call = live_action_chip_last_call_static(&kind);
+
+    claim_rate_limit_slot(last_call, LIVE_INSIGHTS_MIN_CALL_INTERVAL)?;
+
+    let _guard = LiveInsightsGuard::try_claim()
+        .ok_or_else(|| LIVE_INSIGHTS_IN_PROGRESS_ERROR.to_string())?;
+    commit_rate_limit_slot(last_call);
+
+    generate_bounded_live_llm_text(&app, system_prompt).await
+}
+
 #[cfg(test)]
 mod live_insights_window_tests {
     use super::*;
     use crate::audio::recording_saver::TranscriptSegment;
+
+    /// Serializes tests that manipulate the shared `LIVE_INSIGHTS_IN_PROGRESS`
+    /// / `LIVE_INSIGHTS_LAST_CALL` / `LIVE_ACTION_CHIP_RECAP_LAST_CALL` /
+    /// `LIVE_ACTION_CHIP_QUESTIONS_LAST_CALL` statics.
+    /// Cargo runs tests in this module concurrently by default, and those
+    /// statics are shared process-wide state (mirroring the real singleton
+    /// guard/rate-limiter), so two such tests running in parallel can observe
+    /// each other's writes and flake. Every test that touches those statics
+    /// must acquire this lock for its full body. `unwrap_or_else` recovers
+    /// from a poisoned lock (an earlier test panicking while holding it)
+    /// rather than cascading that panic into every other serialized test.
+    static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn seg(id: &str, text: &str) -> TranscriptSegment {
         TranscriptSegment {
@@ -1651,6 +2125,8 @@ mod live_insights_window_tests {
 
     #[test]
     fn live_insights_guard_prevents_concurrent_claims_and_releases_on_drop() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
         // Ensure clean starting state in case another test left it claimed.
         LIVE_INSIGHTS_IN_PROGRESS.store(false, Ordering::SeqCst);
 
@@ -1701,6 +2177,8 @@ mod live_insights_window_tests {
     /// a bare `tokio::time::timeout`.
     #[tokio::test]
     async fn live_insights_guard_releases_even_when_cancellation_wrapper_fires() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
         LIVE_INSIGHTS_IN_PROGRESS.store(false, Ordering::SeqCst);
 
         async fn run_and_get_cancelled() {
@@ -1791,6 +2269,45 @@ mod live_insights_window_tests {
         assert_eq!(mapped, Ok("summary text".to_string()));
     }
 
+    /// REGRESSION TEST (bug): a raw llama.cpp-sidecar "unable to load model"
+    /// error - forwarded verbatim via `Err(e) => Err(e.to_string())` - used to
+    /// reach the user completely unfiltered. A real user hit exactly this:
+    /// "Generation failed: Failed to load model: unable to load model at
+    /// '.../Qwen3.5-4B-Q4_K_M.gguf'". That raw sidecar/llama.cpp string is
+    /// meaningless to a non-technical user and gives no actionable next step,
+    /// unlike the dedicated not-downloaded/downloading/corrupted messaging the
+    /// post-meeting summary flow (`SummaryGeneratorButtonGroup`) already shows
+    /// for this same underlying class of failure. This class of error must
+    /// instead be replaced with `LIVE_LLM_MODEL_UNAVAILABLE_ERROR`.
+    #[test]
+    fn map_generation_outcome_replaces_model_load_failure_with_friendly_message() {
+        let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!(
+            "Failed to load model: unable to load model at '/Users/x/Library/Application \
+             Support/Meetily/models/summary/Qwen3.5-4B-Q4_K_M.gguf'"
+        ));
+
+        let mapped = map_generation_outcome(result, false);
+
+        assert_eq!(mapped, Err(LIVE_LLM_MODEL_UNAVAILABLE_ERROR.to_string()));
+    }
+
+    #[test]
+    fn is_model_load_failure_detects_unable_to_load_model_message() {
+        assert!(is_model_load_failure(
+            "Failed to load model: unable to load model at '/some/path/model.gguf'"
+        ));
+    }
+
+    #[test]
+    fn is_model_load_failure_ignores_unrelated_errors() {
+        assert!(!is_model_load_failure("sidecar exited early"));
+        assert!(!is_model_load_failure(
+            "Live insights generation timed out — will retry on the next update"
+        ));
+        assert!(!is_model_load_failure(LIVE_INSIGHTS_RATE_LIMITED_ERROR));
+        assert!(!is_model_load_failure(LIVE_INSIGHTS_IN_PROGRESS_ERROR));
+    }
+
     #[test]
     fn is_cache_fresh_true_within_ttl() {
         let now = std::time::Instant::now();
@@ -1827,5 +2344,540 @@ mod live_insights_window_tests {
             Some(last_call),
             std::time::Duration::from_secs(5)
         ));
+    }
+
+    #[test]
+    fn live_action_chip_system_prompt_selects_recap_prompt() {
+        assert_eq!(
+            live_action_chip_system_prompt("recap"),
+            Ok(LIVE_ACTION_CHIP_RECAP_PROMPT)
+        );
+    }
+
+    #[test]
+    fn live_action_chip_system_prompt_selects_questions_prompt() {
+        assert_eq!(
+            live_action_chip_system_prompt("questions"),
+            Ok(LIVE_ACTION_CHIP_QUESTIONS_PROMPT)
+        );
+    }
+
+    #[test]
+    fn live_action_chip_system_prompt_rejects_unknown_kind() {
+        let result = live_action_chip_system_prompt("summary");
+        assert!(
+            result.is_err(),
+            "unrecognized kind must be rejected rather than silently falling back"
+        );
+        assert!(
+            result.unwrap_err().contains("summary"),
+            "error message should name the invalid kind so a caller can debug it"
+        );
+
+        // Empty input and wrong-case variants of valid kinds hit the same
+        // fallback arm - no implicit case-folding, so a frontend typo can't be
+        // silently masked.
+        assert!(live_action_chip_system_prompt("").is_err());
+        assert!(live_action_chip_system_prompt("Recap").is_err());
+        assert!(live_action_chip_system_prompt("QUESTIONS").is_err());
+    }
+
+    #[test]
+    fn live_action_chip_prompts_are_distinct_from_each_other_and_from_live_insights() {
+        // The recap/questions chip prompts must read as terser, single-purpose
+        // chip copy - not duplicates of each other or of the fuller running
+        // summary + action items prompt used by `generate_live_insights`.
+        assert_ne!(LIVE_ACTION_CHIP_RECAP_PROMPT, LIVE_ACTION_CHIP_QUESTIONS_PROMPT);
+        assert_ne!(LIVE_ACTION_CHIP_RECAP_PROMPT, LIVE_INSIGHTS_SYSTEM_PROMPT);
+        assert_ne!(LIVE_ACTION_CHIP_QUESTIONS_PROMPT, LIVE_INSIGHTS_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn live_action_chip_last_call_static_selects_distinct_statics_per_kind() {
+        assert!(std::ptr::eq(
+            live_action_chip_last_call_static("recap"),
+            &LIVE_ACTION_CHIP_RECAP_LAST_CALL
+        ));
+        assert!(std::ptr::eq(
+            live_action_chip_last_call_static("questions"),
+            &LIVE_ACTION_CHIP_QUESTIONS_LAST_CALL
+        ));
+        assert!(!std::ptr::eq(
+            live_action_chip_last_call_static("recap"),
+            live_action_chip_last_call_static("questions")
+        ));
+    }
+
+    /// REGRESSION TEST (bug): `generate_live_action_chip` used to track the
+    /// rate-limit window for BOTH the "recap" and "questions" chip kinds in a
+    /// single shared timestamp, even though the two kinds are independent,
+    /// separately-clickable UI elements with fully independent loading state.
+    /// A user who clicks "Recap" (which resolves) and then immediately clicks
+    /// "Questions" for the first time was wrongly rejected with the
+    /// rate-limited sentinel for a chip they never touched.
+    ///
+    /// This test mirrors `generate_live_action_chip`'s exact
+    /// kind -> static selection -> check-then-commit sequence, via
+    /// `live_action_chip_last_call_static` (the same production function the
+    /// real command calls), rather than reaching into a single hardcoded
+    /// static directly - so it actually exercises the fix, not just the
+    /// existence of two separate statics.
+    #[test]
+    fn recap_resolving_must_not_rate_limit_an_immediate_first_questions_click() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Clean slate.
+        *LIVE_ACTION_CHIP_RECAP_LAST_CALL.lock().unwrap() = None;
+        *LIVE_ACTION_CHIP_QUESTIONS_LAST_CALL.lock().unwrap() = None;
+
+        // Simulate a "recap" click that resolves successfully just now -
+        // mirrors `generate_live_action_chip`'s exact
+        // claim_rate_limit_slot -> commit_rate_limit_slot sequence.
+        let recap_last_call = live_action_chip_last_call_static("recap");
+        claim_rate_limit_slot(recap_last_call, LIVE_INSIGHTS_MIN_CALL_INTERVAL)
+            .expect("first recap click should pass the rate limiter");
+        commit_rate_limit_slot(recap_last_call);
+
+        // Immediately afterwards, the user clicks "Questions" for the very
+        // first time. Because the two kinds are logically independent chips,
+        // this must be accepted - "questions" has never been called before.
+        let questions_last_call = live_action_chip_last_call_static("questions");
+        let questions_check =
+            claim_rate_limit_slot(questions_last_call, LIVE_INSIGHTS_MIN_CALL_INTERVAL);
+
+        assert!(
+            questions_check.is_ok(),
+            "an immediate first click on a DIFFERENT chip kind must not be rejected as \
+             rate-limited just because the OTHER kind's chip happened to resolve moments ago - \
+             the two kinds must track their rate-limit windows independently"
+        );
+    }
+
+    // `generate_live_action_chip` deliberately reuses `LiveInsightsGuard` rather
+    // than an independent lock, so it contends for the same single-flight slot
+    // as `generate_live_insights` (both ultimately drive the one shared
+    // llama-helper sidecar process). That single-flight behavior is already
+    // covered by `live_insights_guard_prevents_concurrent_claims_and_releases_on_drop`
+    // above, since both commands claim the same `LiveInsightsGuard`.
+
+    /// REGRESSION TEST: reproduces the sequence a real user hits when they
+    /// click a chip while another live-insights/chip call is still running,
+    /// get the "still busy" (`LIVE_INSIGHTS_IN_PROGRESS_ERROR`) message, wait
+    /// for it to clear, and immediately retry - exactly the "rapid
+    /// double-click a single chip" scenario called out for this review.
+    ///
+    /// Guards against a bug where `claim_rate_limit_slot` unconditionally
+    /// stamped the rate-limit timestamp on success, before
+    /// `LiveInsightsGuard::try_claim()` was attempted. A call that passed the
+    /// rate-limit check but then lost the race for the single-flight guard
+    /// would still burn the rate-limit window despite never actually running
+    /// a generation, wrongly rate-limiting an immediate legitimate retry once
+    /// the guard freed up. Fixed by splitting the check
+    /// (`claim_rate_limit_slot`, side-effect-free) from the commit
+    /// (`commit_rate_limit_slot`, called only after the guard is actually
+    /// claimed) - see their doc comments.
+    #[test]
+    fn rate_limit_slot_is_burned_by_a_call_that_only_loses_the_guard_race() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Clean slate: no previous chip call, and simulate some other
+        // long-running call (a live-insights poll tick, or another chip
+        // click) currently holding the single-flight guard.
+        *LIVE_ACTION_CHIP_RECAP_LAST_CALL.lock().unwrap() = None;
+        LIVE_INSIGHTS_IN_PROGRESS.store(true, Ordering::SeqCst);
+
+        // --- Call A: user's first click -------------------------------------------------
+        // Passes the rate limiter (no prior call recorded)...
+        let rate_check_a = claim_rate_limit_slot(
+            &LIVE_ACTION_CHIP_RECAP_LAST_CALL,
+            LIVE_INSIGHTS_MIN_CALL_INTERVAL,
+        );
+        assert!(rate_check_a.is_ok(), "first click should pass the rate limiter");
+
+        // ...but loses the race for the single-flight guard, because the
+        // simulated other call is still in progress. `claim_rate_limit_slot`
+        // is side-effect-free (see its doc comment), so this loss doesn't
+        // stamp the rate-limit timestamp - `generate_live_action_chip` only
+        // does that via `commit_rate_limit_slot`, after the guard claim
+        // below actually succeeds.
+        let guard_a = LiveInsightsGuard::try_claim();
+        assert!(
+            guard_a.is_none(),
+            "guard should be busy - simulating a concurrent in-flight call"
+        );
+        // Call A returns Err(LIVE_INSIGHTS_IN_PROGRESS_ERROR) to the user here
+        // in the real command; no guard was ever held by A.
+
+        // The other in-flight call now finishes and releases the guard.
+        LIVE_INSIGHTS_IN_PROGRESS.store(false, Ordering::SeqCst);
+
+        // --- Call B: user's immediate retry, guard is now free --------------------------
+        let rate_check_b = claim_rate_limit_slot(
+            &LIVE_ACTION_CHIP_RECAP_LAST_CALL,
+            LIVE_INSIGHTS_MIN_CALL_INTERVAL,
+        );
+
+        // The retry is allowed through: the guard is free and Call A never
+        // stamped the rate-limit timestamp (it lost the guard race before
+        // `commit_rate_limit_slot` would have run), so the user doing exactly
+        // what the "still busy, try again" UI copy told them to do succeeds.
+        assert!(
+            rate_check_b.is_ok(),
+            "a retry immediately after the single-flight guard freed up should not be \
+             rate-limited just because an earlier attempt that never actually generated \
+             anything (it lost the guard race) had already stamped the rate-limit clock"
+        );
+    }
+
+    /// REGRESSION/ADVERSARIAL TEST (round 2): reproduces "app/window torn down
+    /// mid-generation" by aborting a tokio task that is holding the guard
+    /// partway through a simulated slow generation, instead of letting the
+    /// call finish and drop the guard normally. If `LiveInsightsGuard` only
+    /// released on normal scope-exit (and not on the future simply being
+    /// dropped by `.abort()`), this would leave `LIVE_INSIGHTS_IN_PROGRESS`
+    /// stuck `true` forever, permanently wedging both `generate_live_insights`
+    /// and `generate_live_action_chip` for the rest of the process lifetime
+    /// (they share this single guard).
+    #[tokio::test]
+    async fn guard_releases_when_holding_task_is_aborted_mid_generation() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        LIVE_INSIGHTS_IN_PROGRESS.store(false, Ordering::SeqCst);
+
+        let task: JoinHandle<()> = tokio::spawn(async move {
+            let _guard = LiveInsightsGuard::try_claim().expect("should claim cleanly");
+            // Simulate a slow in-flight generation call (e.g. waiting on the
+            // llama-helper sidecar) that is still running when the app/window
+            // is torn down.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+
+        // Give the spawned task a chance to actually claim the guard before we
+        // tear it down.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            LiveInsightsGuard::try_claim().is_none(),
+            "sanity check: guard should be held by the spawned task at this point"
+        );
+
+        // Simulate app/window teardown aborting the in-flight command task
+        // (e.g. Tauri dropping the future rather than letting it run to
+        // completion).
+        task.abort();
+        let _ = task.await;
+
+        assert!(
+            LiveInsightsGuard::try_claim().is_some(),
+            "aborting the task mid-generation must still run the guard's Drop impl and \
+             release LIVE_INSIGHTS_IN_PROGRESS - otherwise live insights/action chips would \
+             be permanently wedged off for the rest of the app session after any teardown \
+             that happens to land mid-generation"
+        );
+    }
+
+    /// ADVERSARIAL TEST (round 2): hammers `claim_rate_limit_slot` /
+    /// `LiveInsightsGuard::try_claim` / `commit_rate_limit_slot` from many real
+    /// OS threads at once (not just a hand-sequenced simulation), to check for
+    /// any TOCTOU introduced by splitting the rate-limit "check" from "commit"
+    /// into two separate lock acquisitions with a gap between them. Asserts
+    /// two invariants that must hold under real concurrent execution:
+    ///   1. At most one thread ever believes it is "inside" the guarded
+    ///      section at a time (no double-claim).
+    ///   2. Exactly as many rate-limit commits happen as successful guard
+    ///      claims - a thread that loses the guard race never commits the
+    ///      rate-limit slot (this is the round-1 fix; this test re-verifies it
+    ///      holds under genuine thread-level parallelism, not just a
+    ///      hand-ordered sequence).
+    #[test]
+    fn concurrent_threads_never_double_claim_guard_or_double_commit_rate_limit() {
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        LIVE_INSIGHTS_IN_PROGRESS.store(false, Ordering::SeqCst);
+        *LIVE_ACTION_CHIP_RECAP_LAST_CALL.lock().unwrap() = None;
+
+        static INSIDE_GUARDED_SECTION: AtomicBool = AtomicBool::new(false);
+        static MAX_CONCURRENT_HOLDERS_SEEN: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        static SUCCESSFUL_GUARD_CLAIMS: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        static RATE_LIMIT_COMMITS: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+
+        INSIDE_GUARDED_SECTION.store(false, Ordering::SeqCst);
+        MAX_CONCURRENT_HOLDERS_SEEN.store(0, Ordering::SeqCst);
+        SUCCESSFUL_GUARD_CLAIMS.store(0, Ordering::SeqCst);
+        RATE_LIMIT_COMMITS.store(0, Ordering::SeqCst);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let mut handles = Vec::new();
+
+        for _ in 0..16 {
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                // Line every thread up so they all hit the check/claim/commit
+                // sequence as close to simultaneously as possible.
+                barrier.wait();
+
+                // Mirrors generate_live_action_chip's exact sequence.
+                if claim_rate_limit_slot(&LIVE_ACTION_CHIP_RECAP_LAST_CALL, std::time::Duration::from_millis(0))
+                    .is_err()
+                {
+                    return;
+                }
+
+                let guard = LiveInsightsGuard::try_claim();
+                if guard.is_none() {
+                    return;
+                }
+                SUCCESSFUL_GUARD_CLAIMS.fetch_add(1, Ordering::SeqCst);
+
+                // Detect any overlap: if another thread is concurrently inside
+                // this section too, the guard failed to provide exclusion.
+                let was_already_inside = INSIDE_GUARDED_SECTION.swap(true, Ordering::SeqCst);
+                assert!(!was_already_inside, "two threads inside the guarded section at once");
+                MAX_CONCURRENT_HOLDERS_SEEN.fetch_add(1, Ordering::SeqCst);
+
+                commit_rate_limit_slot(&LIVE_ACTION_CHIP_RECAP_LAST_CALL);
+                RATE_LIMIT_COMMITS.fetch_add(1, Ordering::SeqCst);
+
+                // Hold the section briefly to widen the window for a racing
+                // thread to (incorrectly) slip in, if the guard were broken.
+                std::thread::sleep(std::time::Duration::from_millis(5));
+
+                INSIDE_GUARDED_SECTION.store(false, Ordering::SeqCst);
+                drop(guard);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let claims = SUCCESSFUL_GUARD_CLAIMS.load(Ordering::SeqCst);
+        let commits = RATE_LIMIT_COMMITS.load(Ordering::SeqCst);
+        assert_eq!(
+            claims, 1,
+            "exactly one of the 16 racing threads should win the single-flight guard \
+             (all fired at once with a fresh rate-limit slot, so all 16 pass the rate-limit \
+             check, but only one may actually claim the guard)"
+        );
+        assert_eq!(
+            commits, claims,
+            "the number of committed rate-limit slots must exactly equal the number of \
+             successful guard claims - any thread that lost the guard race must not have \
+             committed (this is the round-1 fix; verifies it holds under real thread \
+             parallelism, not just a hand-ordered simulation)"
+        );
+
+        // Clean up the shared guard for any tests that run after this one.
+        LIVE_INSIGHTS_IN_PROGRESS.store(false, Ordering::SeqCst);
+    }
+
+    // ========================================================================
+    // Provider routing (`resolve_live_llm_provider` / `resolve_provider_invocation`)
+    //
+    // `generate_bounded_live_llm_text` itself needs a real `AppHandle` (it
+    // calls `api_get_model_config`, `builtin_ai_is_model_ready`, etc.), so
+    // these tests exercise the pure routing/validation logic it delegates to
+    // instead - same pattern as `map_generation_outcome` and
+    // `live_action_chip_last_call_static` above being tested directly rather
+    // than through the full Tauri command.
+    // ========================================================================
+
+    /// (a) No saved config (fresh install) must resolve to BuiltInAI, so the
+    /// pre-existing sidecar-only behavior is exactly preserved by default.
+    #[test]
+    fn resolve_live_llm_provider_none_defaults_to_builtin() {
+        assert_eq!(resolve_live_llm_provider(None), LLMProvider::BuiltInAI);
+    }
+
+    /// (a) An explicit builtin-ai selection (and its legacy aliases) must
+    /// stay on the builtin route.
+    #[test]
+    fn resolve_live_llm_provider_explicit_builtin_stays_builtin() {
+        assert_eq!(
+            resolve_live_llm_provider(Some("builtin-ai")),
+            LLMProvider::BuiltInAI
+        );
+        assert_eq!(
+            resolve_live_llm_provider(Some("local-llama")),
+            LLMProvider::BuiltInAI
+        );
+    }
+
+    /// (a) An unparseable/unknown provider string (e.g. a stale or corrupted
+    /// settings row) must fall back to BuiltInAI rather than erroring out or
+    /// silently treating it as some other provider.
+    #[test]
+    fn resolve_live_llm_provider_unparseable_string_defaults_to_builtin() {
+        assert_eq!(
+            resolve_live_llm_provider(Some("not-a-real-provider")),
+            LLMProvider::BuiltInAI
+        );
+    }
+
+    /// A configured Groq provider must resolve to the Groq route, not
+    /// builtin - this is the core regression this change fixes.
+    #[test]
+    fn resolve_live_llm_provider_groq_resolves_to_groq() {
+        assert_eq!(resolve_live_llm_provider(Some("groq")), LLMProvider::Groq);
+    }
+
+    #[test]
+    fn resolve_live_llm_provider_is_case_insensitive() {
+        assert_eq!(resolve_live_llm_provider(Some("GROQ")), LLMProvider::Groq);
+    }
+
+    /// (b) A configured non-builtin provider (Groq) with a valid API key must
+    /// resolve to a `Provider` invocation carrying that key/model through
+    /// unchanged - proving the routing decision picks `generate_summary`
+    /// over the sidecar rather than erroring or silently falling back.
+    #[test]
+    fn resolve_provider_invocation_groq_with_key_routes_to_provider_call() {
+        let invocation = resolve_provider_invocation(
+            &LLMProvider::Groq,
+            "llama-3.3-70b-versatile",
+            Some("gsk_test_key"),
+            None,
+            None,
+        )
+        .expect("valid API key should resolve successfully");
+
+        assert_eq!(
+            invocation,
+            LiveLlmProviderInvocation {
+                provider: LLMProvider::Groq,
+                model_name: "llama-3.3-70b-versatile".to_string(),
+                api_key: "gsk_test_key".to_string(),
+                ollama_endpoint: None,
+                custom_openai_endpoint: None,
+                custom_openai_max_tokens: None,
+                custom_openai_temperature: None,
+                custom_openai_top_p: None,
+            }
+        );
+    }
+
+    /// (c) A configured non-builtin provider (Groq) with NO API key must
+    /// return a clear, actionable error - not a builtin-style "model
+    /// missing/corrupted" message, and not a silent fallthrough that would
+    /// attempt the call anyway.
+    #[test]
+    fn resolve_provider_invocation_groq_without_key_returns_clear_error() {
+        let err = resolve_provider_invocation(&LLMProvider::Groq, "llama-3.3-70b-versatile", None, None, None)
+            .expect_err("missing API key must be rejected");
+
+        assert_eq!(
+            err,
+            "No API key configured for Groq — add it in Settings → Model Settings."
+        );
+        // Must not resemble the builtin "model missing/corrupted" error path
+        // (`LIVE_LLM_MODEL_UNAVAILABLE_ERROR`) - a missing key is a distinct,
+        // actionable problem from a missing/corrupted model file.
+        assert!(!err.to_lowercase().contains("missing or corrupted"));
+    }
+
+    /// An empty (rather than absent) API key must be treated the same as a
+    /// missing one - guards against a blank string in the settings DB
+    /// silently passing validation.
+    #[test]
+    fn resolve_provider_invocation_empty_key_is_treated_as_missing() {
+        let err = resolve_provider_invocation(&LLMProvider::OpenAI, "gpt-4o", Some("   "), None, None)
+            .expect_err("whitespace-only API key must be rejected");
+        assert!(err.contains("No API key configured for OpenAI"));
+    }
+
+    /// Ollama doesn't require an API key (mirrors
+    /// `SummaryService::process_transcript_background` in `summary/service.rs`)
+    /// - only its optional custom endpoint should be threaded through.
+    #[test]
+    fn resolve_provider_invocation_ollama_needs_no_api_key() {
+        let invocation = resolve_provider_invocation(
+            &LLMProvider::Ollama,
+            "llama3.2:latest",
+            None,
+            Some("http://custom-host:11434"),
+            None,
+        )
+        .expect("Ollama must not require an API key");
+
+        assert_eq!(invocation.api_key, "");
+        assert_eq!(
+            invocation.ollama_endpoint.as_deref(),
+            Some("http://custom-host:11434")
+        );
+    }
+
+    /// CustomOpenAI with a saved config must thread through its endpoint,
+    /// key, and generation params from that config (not from the top-level
+    /// `ModelConfig.api_key`, which is separate).
+    #[test]
+    fn resolve_provider_invocation_custom_openai_with_config_uses_its_fields() {
+        let config = crate::summary::CustomOpenAIConfig {
+            endpoint: "http://localhost:8000/v1".to_string(),
+            api_key: Some("local-key".to_string()),
+            model: "mistral-7b".to_string(),
+            max_tokens: Some(2048),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+        };
+
+        let invocation = resolve_provider_invocation(
+            &LLMProvider::CustomOpenAI,
+            "mistral-7b",
+            None,
+            None,
+            Some(&config),
+        )
+        .expect("CustomOpenAI with a saved config should resolve successfully");
+
+        assert_eq!(invocation.api_key, "local-key");
+        assert_eq!(
+            invocation.custom_openai_endpoint.as_deref(),
+            Some("http://localhost:8000/v1")
+        );
+        assert_eq!(invocation.custom_openai_max_tokens, Some(2048));
+        assert_eq!(invocation.custom_openai_temperature, Some(0.7));
+        assert_eq!(invocation.custom_openai_top_p, Some(0.9));
+    }
+
+    /// CustomOpenAI selected but with no saved endpoint config must return a
+    /// clear error rather than attempting a call with an empty endpoint.
+    #[test]
+    fn resolve_provider_invocation_custom_openai_without_config_returns_clear_error() {
+        let err = resolve_provider_invocation(&LLMProvider::CustomOpenAI, "mistral-7b", None, None, None)
+            .expect_err("missing CustomOpenAI config must be rejected");
+        assert!(err.contains("Custom OpenAI"));
+        assert!(err.contains("no endpoint configured"));
+    }
+
+    /// CustomOpenAI's API key is optional even when a config exists (some
+    /// self-hosted OpenAI-compatible servers don't require one) - `None`
+    /// there must resolve to an empty key, not an error.
+    #[test]
+    fn resolve_provider_invocation_custom_openai_optional_key_defaults_to_empty() {
+        let config = crate::summary::CustomOpenAIConfig {
+            endpoint: "http://localhost:8000/v1".to_string(),
+            api_key: None,
+            model: "mistral-7b".to_string(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let invocation = resolve_provider_invocation(
+            &LLMProvider::CustomOpenAI,
+            "mistral-7b",
+            None,
+            None,
+            Some(&config),
+        )
+        .expect("a config with no api_key should still resolve");
+
+        assert_eq!(invocation.api_key, "");
+    }
+
+    #[test]
+    #[should_panic(expected = "must not be called for LLMProvider::BuiltInAI")]
+    fn resolve_provider_invocation_panics_if_called_with_builtin_ai() {
+        let _ = resolve_provider_invocation(&LLMProvider::BuiltInAI, "any-model", None, None, None);
     }
 }

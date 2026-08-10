@@ -1,7 +1,6 @@
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { Loader2, Sparkles, AlertCircle } from 'lucide-react';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { MarkdownContent } from '@/components/MarkdownContent';
 import type { UseLiveInsightsResult } from '@/hooks/useLiveInsights';
 
 /**
@@ -59,11 +58,7 @@ export function LiveInsightsPanel({ insights, isLoading, error }: UseLiveInsight
               </div>
             )}
 
-            {insights && (
-              <div className="prose prose-sm max-w-none prose-p:my-2 prose-ul:my-2 prose-headings:my-2">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{insights}</ReactMarkdown>
-              </div>
-            )}
+            {insights && <MarkdownContent>{insights}</MarkdownContent>}
           </div>
         </div>
       </div>

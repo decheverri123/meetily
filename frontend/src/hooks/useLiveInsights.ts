@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useTranscripts } from '@/contexts/TranscriptContext';
+import { LIVE_GENERATION_IN_PROGRESS_ERROR } from '@/lib/liveGenerationErrors';
 
 /** How often we poll the backend for a fresh running summary while recording. */
 const POLL_INTERVAL_MS = 45000;
@@ -14,13 +15,6 @@ const POLL_INTERVAL_MS = 45000;
  * insights on every tick when nobody has said anything new.
  */
 const MIN_GROWTH_CHARS = 40;
-
-/**
- * Exact rejection reason the backend uses to signal "a call is already running".
- * Must stay byte-identical to the Rust-side constant in
- * frontend/src-tauri/src/audio/recording_commands.rs.
- */
-const IN_PROGRESS_ERROR = 'insights generation already in progress';
 
 export interface UseLiveInsightsResult {
   /** Latest markdown-formatted running summary + action items. Empty string until first content arrives. */
@@ -108,7 +102,7 @@ export function useLiveInsights(): UseLiveInsightsResult {
 
       const message = err instanceof Error ? err.message : String(err);
 
-      if (message === IN_PROGRESS_ERROR) {
+      if (message === LIVE_GENERATION_IN_PROGRESS_ERROR) {
         // Skip silently: a previous call is still running, try again next tick.
       } else {
         setError(message || 'Failed to generate live insights');

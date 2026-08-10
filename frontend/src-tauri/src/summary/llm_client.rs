@@ -332,8 +332,10 @@ pub async fn generate_summary(
     }
 }
 
-/// Helper function to get provider name for logging
-fn provider_name(provider: &LLMProvider) -> &str {
+/// Helper function to get provider name for logging (and, per callers outside
+/// this module such as `audio::recording_commands`, for user-facing error
+/// messages naming the configured provider).
+pub(crate) fn provider_name(provider: &LLMProvider) -> &str {
     match provider {
         LLMProvider::OpenAI => "OpenAI",
         LLMProvider::Claude => "Claude",

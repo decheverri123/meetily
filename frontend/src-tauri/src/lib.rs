@@ -612,6 +612,8 @@ pub fn run() {
             audio::recording_commands::get_recording_meeting_name,
             // Live in-meeting insights (running summary + action items during active recording)
             audio::recording_commands::generate_live_insights,
+            // Live in-meeting action chips (short on-demand "recap" / "questions" suggestions)
+            audio::recording_commands::generate_live_action_chip,
             // Device monitoring commands (AirPods/Bluetooth disconnect/reconnect)
             audio::recording_commands::poll_audio_device_events,
             audio::recording_commands::get_reconnection_status,

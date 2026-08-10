@@ -16,12 +16,14 @@ import Analytics from '@/lib/analytics';
 import { SettingsModals } from './_components/SettingsModal';
 import { TranscriptPanel } from './_components/TranscriptPanel';
 import { LiveInsightsPanel } from './_components/LiveInsightsPanel';
+import { LiveActionChips } from './_components/LiveActionChips';
 import { useModalState } from '@/hooks/useModalState';
 import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
 import { useLiveInsights } from '@/hooks/useLiveInsights';
+import { useLiveActionChips } from '@/hooks/useLiveActionChips';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { indexedDBService } from '@/services/indexedDBService';
 import { toast } from 'sonner';
@@ -73,6 +75,11 @@ export default function Home() {
   // state - generated insights, growth tracking, epoch guard - stays mounted
   // and survives the user toggling the Live Insights panel off and back on.
   const liveInsights = useLiveInsights();
+
+  // Called unconditionally for the same reason as useLiveInsights() above -
+  // keeps per-chip loading/result/error state mounted for the life of the
+  // meeting regardless of any panel visibility.
+  const liveActionChips = useLiveActionChips();
 
   useEffect(() => {
     // Track page view
@@ -268,6 +275,9 @@ export default function Home() {
                       meetingName={meetingTitle}
                     />
                   </div>
+                  {(recordingState.isRecording || liveActionChips.hasActivity) && (
+                    <LiveActionChips {...liveActionChips} />
+                  )}
                   <Button
                     type="button"
                     variant={showLiveInsights ? 'default' : 'outline'}
