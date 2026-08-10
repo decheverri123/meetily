@@ -2,7 +2,10 @@
 
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
+import { Sparkles } from 'lucide-react';
 import { RecordingControls } from '@/components/RecordingControls';
+import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
@@ -12,11 +15,13 @@ import { StatusOverlays } from '@/app/_components/StatusOverlays';
 import Analytics from '@/lib/analytics';
 import { SettingsModals } from './_components/SettingsModal';
 import { TranscriptPanel } from './_components/TranscriptPanel';
+import { LiveInsightsPanel } from './_components/LiveInsightsPanel';
 import { useModalState } from '@/hooks/useModalState';
 import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
+import { useLiveInsights } from '@/hooks/useLiveInsights';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { indexedDBService } from '@/services/indexedDBService';
 import { toast } from 'sonner';
@@ -27,6 +32,8 @@ export default function Home() {
   const [isRecording, setIsRecordingState] = useState(false);
   const [barHeights, setBarHeights] = useState(['58%', '76%', '58%']);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
+  // Opt-in Live Insights panel - defaults to OFF so existing recording UX is unchanged.
+  const [showLiveInsights, setShowLiveInsights] = useState(false);
 
   // Use contexts for state management
   const { meetingTitle } = useTranscripts();
@@ -61,6 +68,11 @@ export default function Home() {
   } = useTranscriptRecovery();
 
   const router = useRouter();
+
+  // Called unconditionally (not gated on `showLiveInsights`) so its internal
+  // state - generated insights, growth tracking, epoch guard - stays mounted
+  // and survives the user toggling the Live Insights panel off and back on.
+  const liveInsights = useLiveInsights();
 
   useEffect(() => {
     // Track page view
@@ -213,11 +225,19 @@ export default function Home() {
         onLoadPreview={loadMeetingTranscripts}
       />
       <div className="flex flex-1 overflow-hidden">
-        <TranscriptPanel
-          isProcessingStop={isProcessingStop}
-          isStopping={isStopping}
-          showModal={showModal}
-        />
+        <div className={cn('flex flex-col overflow-hidden', showLiveInsights ? 'w-1/2' : 'flex-1')}>
+          <TranscriptPanel
+            isProcessingStop={isProcessingStop}
+            isStopping={isStopping}
+            showModal={showModal}
+          />
+        </div>
+
+        {showLiveInsights && (
+          <div className="w-1/2 flex flex-col overflow-hidden">
+            <LiveInsightsPanel {...liveInsights} />
+          </div>
+        )}
 
         {/* Recording controls - only show when permissions are granted or already recording and not showing status messages */}
         {(hasMicrophone || isRecording) &&
@@ -230,7 +250,7 @@ export default function Home() {
                   marginLeft: sidebarCollapsed ? '4rem' : '16rem'
                 }}
               >
-                <div className="w-2/3 max-w-[750px] flex justify-center">
+                <div className="w-2/3 max-w-[750px] flex justify-center items-center gap-2">
                   <div className="bg-white rounded-full shadow-lg flex items-center">
                     <RecordingControls
                       isRecording={recordingState.isRecording}
@@ -248,6 +268,16 @@ export default function Home() {
                       meetingName={meetingTitle}
                     />
                   </div>
+                  <Button
+                    type="button"
+                    variant={showLiveInsights ? 'default' : 'outline'}
+                    size="icon"
+                    className={cn('rounded-full shadow-lg h-9 w-9', !showLiveInsights && 'bg-white')}
+                    onClick={() => setShowLiveInsights(prev => !prev)}
+                    title={showLiveInsights ? 'Hide Live Insights' : 'Show Live Insights'}
+                  >
+                    <Sparkles className="w-4 h-4" />
+                  </Button>
                 </div>
               </div>
             </div>
