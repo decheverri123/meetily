@@ -7,7 +7,10 @@ import { useTranscriptSegments } from '@/hooks/useTranscriptSegments';
 import { buildTimestampedTranscript } from '@/lib/askCitations';
 import { useSuggestedQuestions } from '@/hooks/useSuggestedQuestions';
 import { useConfig } from '@/contexts/ConfigContext';
-import { modelConfigLabel } from './LiveActionChipModelPicker';
+import { modelConfigLabel, LiveActionChipModelPicker } from './LiveActionChipModelPicker';
+import { LiveActionChips } from './LiveActionChips';
+import { LiveProviderIndicator } from './LiveProviderIndicator';
+import type { LiveActionChipModelOverride, UseLiveActionChipsResult } from '@/hooks/useLiveActionChips';
 
 /**
  * Ask sidebar for the meeting currently being recorded. Calls
@@ -40,6 +43,15 @@ interface LiveAskPanelProps {
   onAnswered?: () => void;
   /** Fires once, the first time real (non-empty) suggestions land. */
   onSuggestionsReady?: () => void;
+  /**
+   * Recap/Questions-to-ask chips, pinned below the header. Kept mounted at
+   * the page level (see `useLiveActionChips`'s own doc) so per-chip state
+   * survives this panel collapsing/reopening - passed in rather than owned here.
+   */
+  liveActionChips: UseLiveActionChipsResult;
+  liveActionChipOverride: LiveActionChipModelOverride | null;
+  onLiveActionChipOverrideChange: (override: LiveActionChipModelOverride | null) => void;
+  isRecording: boolean;
 }
 
 export function LiveAskPanel({
@@ -49,6 +61,10 @@ export function LiveAskPanel({
   onClose,
   onAnswered,
   onSuggestionsReady,
+  liveActionChips,
+  liveActionChipOverride,
+  onLiveActionChipOverrideChange,
+  isRecording,
 }: LiveAskPanelProps) {
   const { transcripts } = useTranscripts();
   const segments = useTranscriptSegments();
@@ -82,6 +98,10 @@ export function LiveAskPanel({
     hadSuggestionsRef.current = suggestions.length > 0;
   }, [suggestions.length, onSuggestionsReady]);
 
+  // Chips only earn their pinned row once there's something to show - a
+  // stopped meeting with no chips generated yet shouldn't reserve the space.
+  const showActionChips = isRecording || liveActionChips.hasActivity;
+
   return (
     <AskSidebar
       command="ask_about_live_transcript"
@@ -90,6 +110,18 @@ export function LiveAskPanel({
       placeholder="Ask about the meeting so far..."
       suggestions={suggestions}
       modelLabel={modelConfigLabel(modelConfig)}
+      headerExtra={
+        showActionChips && (
+          <>
+            <LiveActionChips {...liveActionChips} />
+            <LiveProviderIndicator provider={liveActionChipOverride?.provider ?? modelConfig.provider} />
+            <LiveActionChipModelPicker
+              override={liveActionChipOverride}
+              onOverrideChange={onLiveActionChipOverrideChange}
+            />
+          </>
+        )
+      }
       fill={fill}
       // Disabled up front rather than round-tripping only to surface the
       // backend's "no transcript yet" rejection.

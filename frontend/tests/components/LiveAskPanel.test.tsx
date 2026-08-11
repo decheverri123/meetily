@@ -23,9 +23,28 @@ const { LiveAskPanel } = await import('../../src/app/_components/LiveAskPanel');
 
 const PLACEHOLDER = /ask about the meeting so far/i;
 
+// Pinned action-chips row - not under test here, so a static, always-idle
+// stand-in keeps it out of the way (isRecording: false, hasActivity: false
+// hides the row entirely, matching LiveAskPanel's own gating).
+const NO_LIVE_ACTION_CHIPS = {
+  chips: {
+    recap: { result: '', isLoading: false, error: null, isRetryable: false, hasGenerated: false },
+    questions: { result: '', isLoading: false, error: null, isRetryable: false, hasGenerated: false },
+  },
+  generate: () => {},
+  hasActivity: false,
+  isRecording: false,
+};
+const BASE_PROPS = {
+  liveActionChips: NO_LIVE_ACTION_CHIPS,
+  liveActionChipOverride: null,
+  onLiveActionChipOverrideChange: () => {},
+  isRecording: false,
+};
+
 function renderPanel(transcripts: Partial<Transcript>[]) {
   mockTranscripts = transcripts;
-  return renderAskPanel(<LiveAskPanel />, PLACEHOLDER);
+  return renderAskPanel(<LiveAskPanel {...BASE_PROPS} />, PLACEHOLDER);
 }
 
 const TWO_SEGMENTS: Partial<Transcript>[] = [
@@ -136,7 +155,7 @@ describe('LiveAskPanel', () => {
 
     mockTranscripts = TWO_SEGMENTS;
     const view = within(
-      render(<LiveAskPanel onCitedSegmentsChange={ids => cited.push(ids)} />).container
+      render(<LiveAskPanel {...BASE_PROPS} onCitedSegmentsChange={ids => cited.push(ids)} />).container
     );
 
     fireEvent.change(view.getByPlaceholderText(PLACEHOLDER), { target: { value: 'What did we agree?' } });
@@ -158,7 +177,7 @@ describe('LiveAskPanel', () => {
     const focused: string[] = [];
     mockTranscripts = TWO_SEGMENTS;
     const view = within(
-      render(<LiveAskPanel onFocusSegment={id => focused.push(id)} />).container
+      render(<LiveAskPanel {...BASE_PROPS} onFocusSegment={id => focused.push(id)} />).container
     );
 
     fireEvent.change(view.getByPlaceholderText(PLACEHOLDER), { target: { value: 'When?' } });

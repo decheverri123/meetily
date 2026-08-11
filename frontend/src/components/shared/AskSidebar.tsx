@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowUp, Check, Copy, Loader2, PanelRightClose, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -62,6 +62,8 @@ export interface AskSidebarProps {
   suggestions: readonly string[];
   /** Footer line naming the model answers are generated with. */
   modelLabel: string;
+  /** Pinned row below the header, outside the scrollable thread - e.g. quick-action chips. */
+  headerExtra?: ReactNode;
   /** Blocks asking when there is nothing to answer from yet. */
   disabled?: boolean;
   disabledHint?: string;
@@ -83,6 +85,7 @@ export function AskSidebar({
   placeholder,
   suggestions,
   modelLabel,
+  headerExtra,
   disabled = false,
   disabledHint,
   fill = false,
@@ -179,6 +182,12 @@ export function AskSidebar({
           </button>
         )}
       </div>
+
+      {headerExtra && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/10 px-5 py-3">
+          {headerExtra}
+        </div>
+      )}
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-5">
         {turns.map(turn => (

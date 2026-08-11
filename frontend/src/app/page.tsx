@@ -19,9 +19,6 @@ import { TranscriptPanel } from './_components/TranscriptPanel';
 import { LiveInsightsPanel } from './_components/LiveInsightsPanel';
 import { LiveAskPanel } from './_components/LiveAskPanel';
 import { AskFloatingBubble } from './_components/AskFloatingBubble';
-import { LiveActionChips } from './_components/LiveActionChips';
-import { LiveActionChipModelPicker } from './_components/LiveActionChipModelPicker';
-import { LiveProviderIndicator } from './_components/LiveProviderIndicator';
 import { useModalState } from '@/hooks/useModalState';
 import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
@@ -67,7 +64,7 @@ export default function Home() {
 
   // Use contexts for state management
   const { meetingTitle, transcripts } = useTranscripts();
-  const { modelConfig, transcriptModelConfig, selectedDevices } = useConfig();
+  const { transcriptModelConfig, selectedDevices } = useConfig();
   const recordingState = useRecordingState();
 
   // Extract status from global state
@@ -387,6 +384,10 @@ export default function Home() {
                 onClose={() => setShowAskPanel(false)}
                 onAnswered={flagAskUnread}
                 onSuggestionsReady={flagAskUnread}
+                liveActionChips={liveActionChips}
+                liveActionChipOverride={liveActionChipOverride}
+                onLiveActionChipOverrideChange={setLiveActionChipOverride}
+                isRecording={recordingState.isRecording}
               />
             </AskFloatingBubble>
           </>
@@ -420,18 +421,6 @@ export default function Home() {
                     selectedDevices={selectedDevices}
                     meetingName={meetingTitle}
                   />
-                  {(recordingState.isRecording || liveActionChips.hasActivity) && (
-                    <>
-                      <LiveActionChips {...liveActionChips} />
-                      <LiveProviderIndicator
-                        provider={liveActionChipOverride?.provider ?? modelConfig.provider}
-                      />
-                      <LiveActionChipModelPicker
-                        override={liveActionChipOverride}
-                        onOverrideChange={setLiveActionChipOverride}
-                      />
-                    </>
-                  )}
                   <Button
                     type="button"
                     variant={showLiveInsights ? 'default' : 'outline'}
