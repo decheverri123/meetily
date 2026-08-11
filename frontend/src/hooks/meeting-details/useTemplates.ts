@@ -1,38 +1,35 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
+import { SummaryDataResponse, SummaryTemplate } from '@/types';
+
+export const AUTO_TEMPLATE_ID = 'auto';
+export const GENERATED_TEMPLATE_ID = '__generated__';
+
+export interface TemplateOption {
+  id: string;
+  name: string;
+  description: string;
+}
 
 export function useTemplates(meetingId?: string) {
-  const [availableTemplates, setAvailableTemplates] = useState<Array<{
-    id: string;
-    name: string;
-    description: string;
-  }>>([]);
-  const [selectedTemplate, setSelectedTemplate] = useState<string>('standard_meeting');
+  const [fetchedTemplates, setFetchedTemplates] = useState<TemplateOption[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<string>(AUTO_TEMPLATE_ID);
+  const [generatedTemplate, setGeneratedTemplate] = useState<SummaryTemplate | null>(null);
+  const isGeneratedTemplate = generatedTemplate !== null;
 
   // Once the user manually picks a template, stop letting the meeting's
-  // stored default (see effect below) override that choice.
+  // stored default or auto-resolution override that choice.
   const userSelectedTemplateRef = useRef(false);
-
-  // Mirrors `availableTemplates` synchronously (updated the instant the fetch
-  // resolves, not on the next render), so the default-template effect below
-  // can check membership against the real list even if it resolves before
-  // React has re-rendered with the fetched templates.
-  const availableTemplatesRef = useRef(availableTemplates);
 
   // Fetch available templates on mount
   useEffect(() => {
     const fetchTemplates = async () => {
       try {
-        const templates = await invokeTauri('api_list_templates') as Array<{
-          id: string;
-          name: string;
-          description: string;
-        }>;
+        const templates = await invokeTauri('api_list_templates') as TemplateOption[];
         console.log('Available templates:', templates);
-        availableTemplatesRef.current = templates;
-        setAvailableTemplates(templates);
+        setFetchedTemplates(templates);
       } catch (error) {
         console.error('Failed to fetch templates:', error);
       }
@@ -40,44 +37,82 @@ export function useTemplates(meetingId?: string) {
     fetchTemplates();
   }, []);
 
-  // Apply the meeting's stored default template (e.g. "youtube_summary" for
-  // meetings created via YouTube import), read from metadata.json, unless
-  // the user has already picked a template manually.
+  // PageContent persists across meeting navigation (meetingId changes via a
+  // search param, no remount), so template selection must be reset explicitly
+  // on meeting switch rather than only updated when new resolution data
+  // arrives — otherwise a generated template from meeting A leaks into
+  // meeting B's dropdown/regenerate state. Mirrors the resync-on-prop-change
+  // pattern useMeetingData.ts uses for its own per-meeting state.
   useEffect(() => {
-    if (!meetingId || userSelectedTemplateRef.current) return;
-
-    let cancelled = false;
-    const applyStoredDefaultTemplate = async () => {
-      try {
-        const defaultTemplate = await invokeTauri<string | null>('api_get_meeting_default_template', {
-          meetingId,
-        });
-        const templateExists = availableTemplatesRef.current.some((t) => t.id === defaultTemplate);
-        if (!cancelled && defaultTemplate && templateExists && !userSelectedTemplateRef.current) {
-          setSelectedTemplate(defaultTemplate);
-        }
-      } catch (error) {
-        console.error('Failed to fetch meeting default template:', error);
-      }
-    };
-    applyStoredDefaultTemplate();
-
-    return () => { cancelled = true; };
+    setSelectedTemplate(AUTO_TEMPLATE_ID);
+    setGeneratedTemplate(null);
+    userSelectedTemplateRef.current = false;
   }, [meetingId]);
 
   // Handle template selection
   const handleTemplateSelection = useCallback((templateId: string, templateName: string) => {
     userSelectedTemplateRef.current = true;
     setSelectedTemplate(templateId);
+    if (templateId !== GENERATED_TEMPLATE_ID) {
+      // Picking anything else (including 'auto') retires the one-use
+      // generated-template entry until the next resolution regenerates one.
+      setGeneratedTemplate(null);
+    }
     toast.success('Template selected', {
       description: `Using "${templateName}" template for summary generation`,
     });
     Analytics.trackFeatureUsed('template_selected');
   }, []);
 
+  // Feeds the auto-template-selection metadata from a polled `api_get_summary`
+  // `data` blob (see SummaryDataResponse) back into template state, so the
+  // dropdown reflects what was actually used and a generated one-off template
+  // can be replayed on Regenerate without another LLM call.
+  const applyResolvedTemplate = useCallback((data: SummaryDataResponse | null | undefined) => {
+    if (!data || data.resolved_template_name === undefined || userSelectedTemplateRef.current) {
+      return;
+    }
+
+    if (data.is_generated_template && data.generated_template_json) {
+      setGeneratedTemplate(data.generated_template_json);
+      setSelectedTemplate(GENERATED_TEMPLATE_ID);
+    } else {
+      setGeneratedTemplate(null);
+      if (data.resolved_template_id) {
+        // Auto-select matched an existing template rather than generating
+        // one — reflect that choice in the dropdown too, not just the
+        // generated-template case.
+        setSelectedTemplate(data.resolved_template_id);
+      }
+    }
+  }, []);
+
+  const availableTemplates = useMemo<TemplateOption[]>(() => {
+    const synthetic: TemplateOption[] = [
+      {
+        id: AUTO_TEMPLATE_ID,
+        name: 'Auto (recommended)',
+        description: 'Automatically pick the best template for this meeting',
+      },
+    ];
+
+    if (generatedTemplate) {
+      synthetic.push({
+        id: GENERATED_TEMPLATE_ID,
+        name: generatedTemplate.name,
+        description: 'Generated for this meeting',
+      });
+    }
+
+    return [...synthetic, ...fetchedTemplates];
+  }, [fetchedTemplates, generatedTemplate]);
+
   return {
     availableTemplates,
     selectedTemplate,
     handleTemplateSelection,
+    isGeneratedTemplate,
+    generatedTemplate,
+    applyResolvedTemplate,
   };
 }

@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Sparkles, Settings, Loader2, FileText, Check, Square } from 'lucide-react';
+import { AUTO_TEMPLATE_ID, GENERATED_TEMPLATE_ID } from '@/hooks/meeting-details/useTemplates';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
@@ -338,19 +339,25 @@ export function SummaryGeneratorButtonGroup({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            {availableTemplates.map((template) => (
-              <DropdownMenuItem
-                key={template.id}
-                onClick={() => onTemplateSelect(template.id, template.name)}
-                title={template.description}
-                className="flex items-center justify-between gap-2"
-              >
-                <span>{template.name}</span>
-                {selectedTemplate === template.id && (
-                  <Check className="h-4 w-4 text-success" />
-                )}
-              </DropdownMenuItem>
-            ))}
+            {availableTemplates.map((template) => {
+              const isSynthetic = template.id === AUTO_TEMPLATE_ID || template.id === GENERATED_TEMPLATE_ID;
+              return (
+                <DropdownMenuItem
+                  key={template.id}
+                  onClick={() => onTemplateSelect(template.id, template.name)}
+                  title={template.description}
+                  className="flex items-center justify-between gap-2"
+                >
+                  <span className="flex items-center gap-1.5">
+                    {isSynthetic && <Sparkles className="h-3.5 w-3.5 text-accent-violet" />}
+                    {template.name}
+                  </span>
+                  {selectedTemplate === template.id && (
+                    <Check className="h-4 w-4 text-success" />
+                  )}
+                </DropdownMenuItem>
+              );
+            })}
 
           </DropdownMenuContent>
         </DropdownMenu>

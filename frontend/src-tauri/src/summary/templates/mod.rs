@@ -39,6 +39,7 @@
 
 mod defaults;
 mod loader;
+mod selector;
 mod types;
 
 // Re-export public API
@@ -46,6 +47,7 @@ pub use loader::{
     get_template, list_template_ids, list_templates, set_bundled_templates_dir,
     validate_and_parse_template,
 };
+pub use selector::{select_template, TemplateChoice, TemplateSelectionContext};
 pub use types::{Template, TemplateSection};
 
 #[cfg(test)]

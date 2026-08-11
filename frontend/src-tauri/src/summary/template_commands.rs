@@ -32,6 +32,20 @@ pub struct TemplateDetails {
     pub sections: Vec<String>,
 }
 
+/// Lists all available templates as (id, name, description) triples, mapped into `TemplateInfo`.
+///
+/// Shared by `api_list_templates` and the auto-select candidate lookup in `service.rs`.
+pub fn list_template_infos() -> Vec<TemplateInfo> {
+    templates::list_templates()
+        .into_iter()
+        .map(|(id, name, description)| TemplateInfo {
+            id,
+            name,
+            description,
+        })
+        .collect()
+}
+
 /// Lists all available templates
 ///
 /// Returns templates from both built-in (embedded) and custom (user data directory) sources.
@@ -45,16 +59,7 @@ pub async fn api_list_templates<R: Runtime>(
 ) -> Result<Vec<TemplateInfo>, String> {
     info!("api_list_templates called");
 
-    let templates = templates::list_templates();
-
-    let template_infos: Vec<TemplateInfo> = templates
-        .into_iter()
-        .map(|(id, name, description)| TemplateInfo {
-            id,
-            name,
-            description,
-        })
-        .collect();
+    let template_infos = list_template_infos();
 
     info!("Found {} available templates", template_infos.len());
 

@@ -261,23 +261,27 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
 pub fn clean_llm_markdown_output(markdown: &str) -> String {
     // Remove <think>...</think> or <thinking>...</thinking> blocks using cached regex
     let without_thinking = THINKING_TAG_REGEX.replace_all(markdown, "");
+    strip_code_fence(&without_thinking)
+}
 
-    let trimmed = without_thinking.trim();
+/// Strips a single leading/trailing markdown code fence (```` ``` ````, optionally
+/// with a language tag like ```` ```json ````) from `text`, if present. Returns the
+/// trimmed content unchanged if it isn't fenced. Shared by markdown summary output
+/// (`clean_llm_markdown_output`) and JSON LLM responses (`templates::selector`).
+pub fn strip_code_fence(text: &str) -> String {
+    let trimmed = text.trim();
 
-    // List of possible language identifiers for code blocks
-    const PREFIXES: &[&str] = &["```markdown\n", "```\n"];
-    const SUFFIX: &str = "```";
+    let Some(after_open) = trimmed.strip_prefix("```") else {
+        return trimmed.to_string();
+    };
 
-    for prefix in PREFIXES {
-        if trimmed.starts_with(prefix) && trimmed.ends_with(SUFFIX) {
-            // Extract content between the fences
-            let content = &trimmed[prefix.len()..trimmed.len() - SUFFIX.len()];
-            return content.trim().to_string();
-        }
-    }
+    // Skip an optional language identifier (e.g. "json", "markdown") up to the first newline.
+    let body = match after_open.find('\n') {
+        Some(idx) => &after_open[idx + 1..],
+        None => after_open,
+    };
 
-    // If no fences found, return the trimmed string
-    trimmed.to_string()
+    body.strip_suffix("```").unwrap_or(body).trim().to_string()
 }
 
 /// Extracts meeting name from the first heading in markdown
