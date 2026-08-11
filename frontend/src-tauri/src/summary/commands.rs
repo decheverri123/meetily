@@ -9,8 +9,9 @@ use crate::database::repositories::{
 use crate::state::AppState;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::summary::metadata::{
-    read_detected_summary_language_from_metadata, read_summary_language_from_metadata,
-    write_detected_summary_language_to_metadata, write_summary_language_to_metadata,
+    read_default_template_from_metadata, read_detected_summary_language_from_metadata,
+    read_summary_language_from_metadata, write_detected_summary_language_to_metadata,
+    write_summary_language_to_metadata,
 };
 use crate::summary::language_detection::{
     detect_summary_language, SummaryLanguageDetection,
@@ -201,6 +202,27 @@ pub async fn api_save_meeting_detected_summary_language<R: Runtime>(
                 .map_err(|e| e.to_string())
         }
         MeetingFolderResolution::NoFolder => Ok(MeetingSummaryLanguagePreference::local_fallback()),
+    }
+}
+
+/// Gets the meeting's stored default summary template (e.g. `"youtube_summary"`
+/// for meetings created via YouTube import) from metadata.json, if any.
+#[tauri::command]
+pub async fn api_get_meeting_default_template<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<Option<String>, String> {
+    log_info!(
+        "api_get_meeting_default_template called for meeting_id: {}",
+        meeting_id
+    );
+
+    match resolve_meeting_folder(state.db_manager.pool(), &meeting_id).await? {
+        MeetingFolderResolution::Folder(folder) => {
+            read_default_template_from_metadata(&folder).map_err(|e| e.to_string())
+        }
+        MeetingFolderResolution::NoFolder => Ok(None),
     }
 }
 
