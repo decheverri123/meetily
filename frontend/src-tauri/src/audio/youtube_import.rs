@@ -148,7 +148,7 @@ fn is_valid_youtube_url(url: &str) -> bool {
     match host {
         "youtube.com" | "m.youtube.com" | "music.youtube.com" => {
             let path = parsed.path();
-            (path == "/watch" && parsed.query_pairs().any(|(k, _)| k == "v"))
+            (path == "/watch" && parsed.query_pairs().any(|(k, v)| k == "v" && !v.is_empty()))
                 || path.starts_with("/shorts/")
                 || path.starts_with("/embed/")
                 || path.starts_with("/live/")
@@ -491,6 +491,10 @@ pub async fn start_youtube_import_command<R: Runtime>(
     }
 
     tauri::async_runtime::spawn(async move {
+        // Reset the cancel flag before the guard makes `is_youtube_import_in_progress()`
+        // visible to the cancel command, so a cancel racing in right after acquire can't
+        // be clobbered by this reset (see test_cancel_immediately_after_guard_acquire_gets_clobbered).
+        YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
         let guard = match YoutubeImportGuard::acquire() {
             Ok(g) => g,
             Err(e) => {
@@ -499,7 +503,6 @@ pub async fn start_youtube_import_command<R: Runtime>(
                 return;
             }
         };
-        YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
         let provider = get_configured_provider(&app)
             .await
@@ -656,11 +659,10 @@ mod tests {
 
     #[test]
     fn test_is_valid_youtube_url_accepts_empty_video_id() {
-        // BUG: `?v=` with an empty value still satisfies `.any(|(k, _)| k == "v")`
-        // since only the key is checked, not the value. This URL has no actual
-        // video id and yt-dlp will reject it, but validation says it's fine.
+        // `?v=` with an empty value must be rejected: the video id is checked
+        // for non-emptiness, not just the key's presence.
         assert!(
-            is_valid_youtube_url("https://www.youtube.com/watch?v="),
+            !is_valid_youtube_url("https://www.youtube.com/watch?v="),
             "empty v= param should not be treated as a valid video URL, but validation accepted it"
         );
     }

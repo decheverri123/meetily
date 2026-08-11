@@ -20,7 +20,7 @@ describe('useTemplates - YouTube import default_template wiring', () => {
     mock.restore();
   });
 
-  test('a stored default_template not present in availableTemplates is applied anyway, leaving selectedTemplate pointing at a template that does not exist', async () => {
+('a stored default_template not present in availableTemplates is NOT applied, leaving the existing selection intact', async () => {
     invokeImpl = async (cmd: string) => {
       if (cmd === 'api_list_templates') {
         // The template list a real user actually has - it does NOT contain

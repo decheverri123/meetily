@@ -15,6 +15,12 @@ export function useTemplates(meetingId?: string) {
   // stored default (see effect below) override that choice.
   const userSelectedTemplateRef = useRef(false);
 
+  // Mirrors `availableTemplates` synchronously (updated the instant the fetch
+  // resolves, not on the next render), so the default-template effect below
+  // can check membership against the real list even if it resolves before
+  // React has re-rendered with the fetched templates.
+  const availableTemplatesRef = useRef(availableTemplates);
+
   // Fetch available templates on mount
   useEffect(() => {
     const fetchTemplates = async () => {
@@ -25,6 +31,7 @@ export function useTemplates(meetingId?: string) {
           description: string;
         }>;
         console.log('Available templates:', templates);
+        availableTemplatesRef.current = templates;
         setAvailableTemplates(templates);
       } catch (error) {
         console.error('Failed to fetch templates:', error);
@@ -45,7 +52,8 @@ export function useTemplates(meetingId?: string) {
         const defaultTemplate = await invokeTauri<string | null>('api_get_meeting_default_template', {
           meetingId,
         });
-        if (!cancelled && defaultTemplate && !userSelectedTemplateRef.current) {
+        const templateExists = availableTemplatesRef.current.some((t) => t.id === defaultTemplate);
+        if (!cancelled && defaultTemplate && templateExists && !userSelectedTemplateRef.current) {
           setSelectedTemplate(defaultTemplate);
         }
       } catch (error) {
