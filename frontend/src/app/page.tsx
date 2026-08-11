@@ -12,6 +12,7 @@ import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateCon
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { StatusOverlays } from '@/app/_components/StatusOverlays';
+import { IdleHome } from '@/app/_components/IdleHome';
 import Analytics from '@/lib/analytics';
 import { SettingsModals } from './_components/SettingsModal';
 import { TranscriptPanel } from './_components/TranscriptPanel';
@@ -44,7 +45,7 @@ export default function Home() {
   const [liveActionChipOverride, setLiveActionChipOverride] = useState<LiveActionChipModelOverride | null>(null);
 
   // Use contexts for state management
-  const { meetingTitle } = useTranscripts();
+  const { meetingTitle, transcripts } = useTranscripts();
   const { modelConfig, transcriptModelConfig, selectedDevices } = useConfig();
   const recordingState = useRecordingState();
 
@@ -52,7 +53,7 @@ export default function Home() {
   const { status, isStopping, isProcessing, isSaving } = recordingState;
 
   // Hooks
-  const { hasMicrophone } = usePermissionCheck();
+  const { hasMicrophone, hasSystemAudio, isChecking, checkPermissions } = usePermissionCheck();
   const { setIsMeetingActive, isCollapsed: sidebarCollapsed, refetchMeetings } = useSidebar();
   const { modals, messages, showModal, hideModal } = useModalState(transcriptModelConfig);
   const { isRecordingDisabled, setIsRecordingDisabled } = useRecordingStateSync(isRecording, setIsRecordingState, setIsMeetingActive);
@@ -198,6 +199,17 @@ export default function Home() {
   // Computed values using global status
   const isProcessingStop = status === RecordingStatus.PROCESSING_TRANSCRIPTS || isProcessing;
 
+  // Idle = no recording session in any phase and nothing transcribed yet. Only
+  // this state swaps in IdleHome; every recording phase keeps the live UI below.
+  const isIdle =
+    !isRecording &&
+    !recordingState.isRecording &&
+    !isStopping &&
+    !isProcessingStop &&
+    !isSaving &&
+    status !== RecordingStatus.STARTING &&
+    transcripts.length === 0;
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
@@ -228,22 +240,37 @@ export default function Home() {
         onLoadPreview={loadMeetingTranscripts}
       />
       <div className="flex flex-1 overflow-hidden">
-        <div className={cn('flex flex-col overflow-hidden', showLiveInsights ? 'w-1/2' : 'flex-1')}>
-          <TranscriptPanel
-            isProcessingStop={isProcessingStop}
-            isStopping={isStopping}
+        {isIdle ? (
+          <IdleHome
+            onStartRecording={handleRecordingStart}
             showModal={showModal}
+            hasMicrophone={hasMicrophone}
+            hasSystemAudio={hasSystemAudio}
+            isCheckingPermissions={isChecking}
+            onRecheckPermissions={checkPermissions}
           />
-        </div>
+        ) : (
+          <>
+            <div className={cn('flex flex-col overflow-hidden', showLiveInsights ? 'w-1/2' : 'flex-1')}>
+              <TranscriptPanel
+                isProcessingStop={isProcessingStop}
+                isStopping={isStopping}
+                showModal={showModal}
+              />
+            </div>
 
-        {showLiveInsights && (
-          <div className="w-1/2 flex flex-col overflow-hidden">
-            <LiveInsightsPanel {...liveInsights} />
-          </div>
+            {showLiveInsights && (
+              <div className="w-1/2 flex flex-col overflow-hidden">
+                <LiveInsightsPanel {...liveInsights} />
+              </div>
+            )}
+          </>
         )}
 
-        {/* Recording controls - only show when permissions are granted or already recording and not showing status messages */}
-        {(hasMicrophone || isRecording) &&
+        {/* Recording controls - only show when permissions are granted or already recording and not showing status messages.
+            Hidden while idle: IdleHome's "Record now" button is the start affordance there. */}
+        {!isIdle &&
+          (hasMicrophone || isRecording) &&
           status !== RecordingStatus.PROCESSING_TRANSCRIPTS &&
           status !== RecordingStatus.SAVING && (
             <div className="fixed bottom-12 left-0 right-0 z-10">

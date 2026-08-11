@@ -7,10 +7,11 @@ import { EmptyStateSummary } from '@/components/EmptyStateSummary';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { SummaryGeneratorButtonGroup } from './SummaryGeneratorButtonGroup';
 import { SummaryUpdaterButtonGroup } from './SummaryUpdaterButtonGroup';
+import { headerTileClass } from './toolbarStyles';
 import Analytics from '@/lib/analytics';
 import { useEffect, useRef, useState, RefObject } from 'react';
 import { toast } from 'sonner';
-import { Languages, ChevronDown } from 'lucide-react';
+import { Languages } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
@@ -228,14 +229,13 @@ export function SummaryPanel({
     <Popover open={langPickerOpen} onOpenChange={setLangPickerOpen}>
       <PopoverTrigger asChild>
         <Button
-          variant="outline"
-          size="sm"
+          variant="ghost"
+          size="icon"
+          className={headerTileClass}
           title={`Summary language: ${effectiveLangLabel}${isLocalFallbackLanguage ? ' (saved on this device)' : ''}`}
           aria-label="Set summary language"
         >
           <Languages size={18} />
-          <span className="hidden lg:inline">{effectiveLangLabel}</span>
-          <ChevronDown size={14} className="text-muted-foreground/60" />
         </Button>
       </PopoverTrigger>
       <PopoverContent
@@ -253,9 +253,8 @@ export function SummaryPanel({
   );
 
   return (
-    <div className="flex-1 min-w-0 flex flex-col bg-background overflow-hidden">
-      {/* Title area */}
-      <div className="p-4 border-b border-border/10">
+    <div className="flex-1 min-w-0 flex flex-col glass-panel overflow-hidden">
+      <div className="flex items-center gap-3 p-4 border-b border-border/10">
         {/* <EditableTitle
           title={meetingTitle}
           isEditing={isEditingTitle}
@@ -264,10 +263,8 @@ export function SummaryPanel({
           onChange={onTitleChange}
         /> */}
 
-        {/* Button groups - only show when summary exists */}
         {aiSummary && !isSummaryLoading && (
-          <div className="flex items-center justify-center w-full pt-0 gap-2">
-            {/* Left-aligned: Summary Generator Button Group */}
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
             <div className="flex-shrink-0">
               <SummaryGeneratorButtonGroup
                 modelConfig={modelConfig}
@@ -288,7 +285,6 @@ export function SummaryPanel({
               />
             </div>
 
-            {/* Right-aligned: Summary Updater Button Group */}
             <div className="flex-shrink-0">
               <SummaryUpdaterButtonGroup
                 isSaving={isSaving}

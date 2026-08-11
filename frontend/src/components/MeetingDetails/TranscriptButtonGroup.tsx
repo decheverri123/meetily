@@ -2,11 +2,12 @@
 
 import { useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
 import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
+import { compactTileClass } from './toolbarStyles';
+import { cn } from '@/lib/utils';
 
 
 interface TranscriptButtonGroupProps {
@@ -31,68 +32,66 @@ export function TranscriptButtonGroup({
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
 
   const handleRetranscribeComplete = useCallback(async () => {
-    // Refetch transcripts to show the updated data
     if (onRefetchTranscripts) {
       await onRefetchTranscripts();
     }
   }, [onRefetchTranscripts]);
 
   return (
-    <div className="flex items-center justify-center w-full gap-2">
-      <ButtonGroup>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            Analytics.trackButtonClick('copy_transcript', 'meeting_details');
-            onCopyTranscript();
-          }}
-          disabled={transcriptCount === 0}
-          title={transcriptCount === 0 ? 'No transcript available' : 'Copy Transcript'}
-        >
-          <Copy />
-          <span className="hidden lg:inline">Copy</span>
-        </Button>
+    <div className="ml-auto flex shrink-0 items-center gap-1.5">
+      <Button
+        variant="ghost"
+        size="icon"
+        className={compactTileClass}
+        onClick={() => {
+          Analytics.trackButtonClick('copy_transcript', 'meeting_details');
+          onCopyTranscript();
+        }}
+        disabled={transcriptCount === 0}
+        title={transcriptCount === 0 ? 'No transcript available' : 'Copy Transcript'}
+        aria-label={transcriptCount === 0 ? 'No transcript available' : 'Copy Transcript'}
+      >
+        <Copy />
+      </Button>
 
-        <Button
-          size="sm"
-          variant="outline"
-          className="xl:px-4"
-          onClick={() => {
-            Analytics.trackButtonClick('open_recording_folder', 'meeting_details');
-            onOpenMeetingFolder();
-          }}
-          title="Open Recording Folder"
-        >
-          <FolderOpen className="xl:mr-2" size={18} />
-          <span className="hidden lg:inline">Recording</span>
-        </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className={compactTileClass}
+        onClick={() => {
+          Analytics.trackButtonClick('open_recording_folder', 'meeting_details');
+          onOpenMeetingFolder();
+        }}
+        title="Open Recording Folder"
+        aria-label="Open Recording Folder"
+      >
+        <FolderOpen />
+      </Button>
 
-        {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
+      {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
+        <>
           <Button
-            size="sm"
-            variant="outline"
-            className="bg-gradient-to-r from-accent-violet/10 to-primary/10 hover:from-accent-violet/20 hover:to-primary/20 border-accent-violet/20 xl:px-4"
+            variant="ghost"
+            size="icon"
+            className={cn(compactTileClass, 'border-accent-violet/25 bg-gradient-to-br from-accent-violet/20 to-primary/20 text-foreground hover:from-accent-violet/30 hover:to-primary/30')}
             onClick={() => {
               Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
               setShowRetranscribeDialog(true);
             }}
             title="Retranscribe to enhance your recorded audio"
+            aria-label="Retranscribe to enhance your recorded audio"
           >
-            <RefreshCw className="xl:mr-2" size={18} />
-            <span className="hidden lg:inline">Enhance</span>
+            <RefreshCw />
           </Button>
-        )}
-      </ButtonGroup>
 
-      {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
-        <RetranscribeDialog
-          open={showRetranscribeDialog}
-          onOpenChange={setShowRetranscribeDialog}
-          meetingId={meetingId}
-          meetingFolderPath={meetingFolderPath}
-          onComplete={handleRetranscribeComplete}
-        />
+          <RetranscribeDialog
+            open={showRetranscribeDialog}
+            onOpenChange={setShowRetranscribeDialog}
+            meetingId={meetingId}
+            meetingFolderPath={meetingFolderPath}
+            onComplete={handleRetranscribeComplete}
+          />
+        </>
       )}
     </div>
   );

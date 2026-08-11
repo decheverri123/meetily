@@ -1,9 +1,10 @@
 "use client";
 
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
+import { headerTileClass } from './toolbarStyles';
 import { Copy, Save, Loader2, Search, FolderOpen } from 'lucide-react';
 import Analytics from '@/lib/analytics';
+import { cn } from '@/lib/utils';
 
 interface SummaryUpdaterButtonGroupProps {
   isSaving: boolean;
@@ -25,46 +26,35 @@ export function SummaryUpdaterButtonGroup({
   hasSummary
 }: SummaryUpdaterButtonGroupProps) {
   return (
-    <ButtonGroup>
-      {/* Save button */}
+    <div className="flex items-center gap-1.5">
       <Button
-        variant="outline"
-        size="sm"
-        className={`${isDirty ? 'bg-success/25' : ""}`}
+        variant="ghost"
+        size="icon"
+        className={cn(headerTileClass, isDirty && 'border-success/30 bg-success/20 text-success hover:bg-success/30')}
         title={isSaving ? "Saving" : "Save Changes"}
+        aria-label={isSaving ? "Saving" : "Save Changes"}
         onClick={() => {
           Analytics.trackButtonClick('save_changes', 'meeting_details');
           onSave();
         }}
         disabled={isSaving}
       >
-        {isSaving ? (
-          <>
-            <Loader2 className="animate-spin" />
-            <span className="hidden lg:inline">Saving...</span>
-          </>
-        ) : (
-          <>
-            <Save />
-            <span className="hidden lg:inline">Save</span>
-          </>
-        )}
+        {isSaving ? <Loader2 className="animate-spin" /> : <Save />}
       </Button>
 
-      {/* Copy button */}
       <Button
-        variant="outline"
-        size="sm"
+        variant="ghost"
+        size="icon"
         title="Copy Summary"
+        aria-label="Copy Summary"
         onClick={() => {
           Analytics.trackButtonClick('copy_summary', 'meeting_details');
           onCopy();
         }}
         disabled={!hasSummary}
-        className="cursor-pointer"
+        className={cn(headerTileClass, 'cursor-pointer')}
       >
         <Copy />
-        <span className="hidden lg:inline">Copy</span>
       </Button>
 
       {/* Find button */}
@@ -84,6 +74,6 @@ export function SummaryUpdaterButtonGroup({
           <span className="hidden lg:inline">Find</span>
         </Button>
       )} */}
-    </ButtonGroup>
+    </div>
   );
 }

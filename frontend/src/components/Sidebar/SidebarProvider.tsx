@@ -66,7 +66,8 @@ export const useSidebar = () => {
 
 export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [currentMeeting, setCurrentMeeting] = useState<CurrentMeeting | null>({ id: 'intro-call', title: '+ New Call' });
-  const [isCollapsed, setIsCollapsed] = useState(true);
+  const [storedIsCollapsed, setStoredIsCollapsed] = useState(true);
+  const [isMeetingDetailsRailExpanded, setIsMeetingDetailsRailExpanded] = useState(false);
   const [meetings, setMeetings] = useState<CurrentMeeting[]>([]);
   const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([]);
   const [isMeetingActive, setIsMeetingActive] = useState(false);
@@ -81,6 +82,16 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 
   const pathname = usePathname();
   const router = useRouter();
+
+  // The meeting-details screen is designed around the narrow icon rail, so it
+  // renders collapsed by default without overwriting the stored preference the
+  // user gets back on every other route.
+  const isMeetingDetailsRoute = pathname?.includes('/meeting-details') ?? false;
+  const isCollapsed = isMeetingDetailsRoute ? !isMeetingDetailsRailExpanded : storedIsCollapsed;
+
+  useEffect(() => {
+    if (!isMeetingDetailsRoute) setIsMeetingDetailsRailExpanded(false);
+  }, [isMeetingDetailsRoute]);
 
   // Extract fetchMeetings as a reusable function
   const fetchMeetings = React.useCallback(async () => {
@@ -126,7 +137,11 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 
 
   const toggleCollapse = () => {
-    setIsCollapsed(!isCollapsed);
+    if (isMeetingDetailsRoute) {
+      setIsMeetingDetailsRailExpanded(prev => !prev);
+    } else {
+      setStoredIsCollapsed(prev => !prev);
+    }
   };
 
   // Update current meeting when on home page

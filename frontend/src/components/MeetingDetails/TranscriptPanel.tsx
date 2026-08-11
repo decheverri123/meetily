@@ -64,12 +64,22 @@ export function TranscriptPanel({
     }));
   }, [transcripts, usePagination, segments]);
 
+  const segmentCount = usePagination
+    ? (totalCount ?? convertedSegments.length)
+    : (transcripts?.length || 0);
+
   return (
     <div className="hidden md:flex w-80 lg:w-[380px] min-w-0 flex-col relative shrink-0 glass-panel overflow-hidden">
-      {/* Title area */}
-      <div className="p-4 border-b border-border/10">
+      <div className="flex items-center gap-3 p-4 border-b border-border/10">
+        <div className="min-w-0">
+          <h2 className="text-[13px] font-semibold leading-tight text-foreground">Transcript</h2>
+          <p className="mt-0.5 font-mono text-[11px] leading-tight text-muted-foreground">
+            {segmentCount} {segmentCount === 1 ? 'segment' : 'segments'}
+          </p>
+        </div>
+
         <TranscriptButtonGroup
-          transcriptCount={usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0)}
+          transcriptCount={segmentCount}
           onCopyTranscript={onCopyTranscript}
           onOpenMeetingFolder={onOpenMeetingFolder}
           meetingId={meetingId}
