@@ -32,7 +32,7 @@ export function LiveActionChips({ chips, generate, isRecording }: UseLiveActionC
                 type="button"
                 onClick={() => generate(kind)}
                 disabled={isLoading || !isRecording}
-                className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-70"
+                className="glass-pill inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary/10 disabled:cursor-not-allowed disabled:opacity-50"
                 title={label}
               >
                 {isLoading ? (
@@ -45,7 +45,7 @@ export function LiveActionChips({ chips, generate, isRecording }: UseLiveActionC
             </PopoverTrigger>
             <PopoverContent className="w-80 max-h-80 overflow-y-auto text-sm" align="center" sideOffset={8}>
               {isLoading && !result && (
-                <div className="flex items-center gap-2 text-gray-400 py-4 justify-center">
+                <div className="flex items-center gap-2 text-muted-foreground py-4 justify-center">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span>Generating...</span>
                 </div>
@@ -56,8 +56,8 @@ export function LiveActionChips({ chips, generate, isRecording }: UseLiveActionC
                   className={cn(
                     'text-xs rounded-md px-3 py-2',
                     isRetryable
-                      ? 'text-gray-500 bg-gray-50 border border-gray-200'
-                      : 'text-amber-600 bg-amber-50 border border-amber-200'
+                      ? 'text-muted-foreground bg-secondary/10 border border-border/10'
+                      : 'text-destructive bg-destructive/10 border border-destructive/20'
                   )}
                 >
                   {error}
@@ -65,7 +65,7 @@ export function LiveActionChips({ chips, generate, isRecording }: UseLiveActionC
               )}
 
               {!isLoading && !error && !result && (
-                <p className="text-gray-400 text-center py-4">
+                <p className="text-muted-foreground text-center py-4">
                   {hasGenerated
                     ? 'Not enough conversation yet — keep talking and try again.'
                     : `Click “${label}” to generate.`}

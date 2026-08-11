@@ -13,13 +13,16 @@ const Logo = React.forwardRef<HTMLButtonElement, LogoProps>(({ isCollapsed }, re
     <Dialog aria-describedby={undefined}>
       {isCollapsed ? (
         <DialogTrigger asChild>
-          <button ref={ref} className="flex items-center justify-start mb-2 cursor-pointer bg-transparent border-none p-0 hover:opacity-80 transition-opacity">
-            <Image src="/logo-collapsed.png" alt="Logo" width={40} height={32} />
+          <button
+            ref={ref}
+            className="flex h-[34px] w-[34px] items-center justify-center rounded-lg border border-border/10 bg-gradient-to-br from-white/10 to-white/0 cursor-pointer hover:opacity-80 transition-opacity"
+          >
+            <Image src="/logo-collapsed.png" alt="Logo" width={22} height={18} className="object-contain" />
           </button>
         </DialogTrigger>
       ) : (
         <DialogTrigger asChild>
-          <span className="text-lg text-center border rounded-full bg-blue-50 border-white font-semibold text-gray-700 mb-2 block items-center cursor-pointer hover:opacity-80 transition-opacity">
+          <span className="glass-pill inline-flex items-center justify-center w-full px-4 py-1.5 mb-2 text-sm font-semibold text-foreground cursor-pointer hover:bg-secondary/10 transition-colors">
             <span>Meetily</span>
           </span>
         </DialogTrigger>

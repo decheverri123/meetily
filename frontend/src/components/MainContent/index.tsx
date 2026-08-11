@@ -11,9 +11,9 @@ const MainContent: React.FC<MainContentProps> = ({ children }) => {
   const { isCollapsed } = useSidebar();
 
   return (
-    <main 
-      className={`flex-1 transition-all duration-300 ${
-        isCollapsed ? 'ml-16' : 'ml-64'
+    <main
+      className={`flex-1 bg-background text-foreground transition-all duration-300 ${
+        isCollapsed ? 'ml-[108px]' : 'ml-[284px]'
       }`}
     >
       <div className="pl-8">

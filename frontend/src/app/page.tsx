@@ -34,7 +34,6 @@ import { useRouter } from 'next/navigation';
 export default function Home() {
   // Local page state (not moved to contexts)
   const [isRecording, setIsRecordingState] = useState(false);
-  const [barHeights, setBarHeights] = useState(['58%', '76%', '58%']);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
   // Opt-in Live Insights panel - defaults to OFF so existing recording UX is unchanged.
   const [showLiveInsights, setShowLiveInsights] = useState(false);
@@ -196,22 +195,6 @@ export default function Home() {
     }
   };
 
-  useEffect(() => {
-    if (recordingState.isRecording) {
-      const interval = setInterval(() => {
-        setBarHeights(prev => {
-          const newHeights = [...prev];
-          newHeights[0] = Math.random() * 20 + 10 + 'px';
-          newHeights[1] = Math.random() * 20 + 10 + 'px';
-          newHeights[2] = Math.random() * 20 + 10 + 'px';
-          return newHeights;
-        });
-      }, 300);
-
-      return () => clearInterval(interval);
-    }
-  }, [recordingState.isRecording]);
-
   // Computed values using global status
   const isProcessingStop = status === RecordingStatus.PROCESSING_TRANSCRIPTS || isProcessing;
 
@@ -220,8 +203,14 @@ export default function Home() {
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: 'easeOut' }}
-      className="flex flex-col h-screen bg-gray-50"
+      className="relative flex flex-col h-screen bg-background text-foreground overflow-hidden"
     >
+      {/* Ambient background glow - purely decorative, sits behind all content */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="animate-drift absolute -top-1/4 left-1/3 h-[60vh] w-[60vh] rounded-full bg-primary/10 blur-[120px]" />
+        <div className="animate-drift absolute bottom-0 right-0 h-[50vh] w-[50vh] rounded-full bg-accent-violet/10 blur-[120px]" style={{ animationDelay: '6s' }} />
+      </div>
+
       {/* All Modals supported*/}
       <SettingsModals
         modals={modals}
@@ -265,23 +254,20 @@ export default function Home() {
                 }}
               >
                 <div className="w-2/3 max-w-[750px] flex justify-center items-center gap-2">
-                  <div className="bg-white rounded-full shadow-lg flex items-center">
-                    <RecordingControls
-                      isRecording={recordingState.isRecording}
-                      onRecordingStop={(callApi = true) => handleRecordingStop(callApi)}
-                      onRecordingStart={handleRecordingStart}
-                      onTranscriptReceived={() => { }} // Not actually used by RecordingControls
-                      onStopInitiated={() => setIsStopping(true)}
-                      barHeights={barHeights}
-                      onTranscriptionError={(message) => {
-                        showModal('errorAlert', message);
-                      }}
-                      isRecordingDisabled={isRecordingDisabled}
-                      isParentProcessing={isProcessingStop}
-                      selectedDevices={selectedDevices}
-                      meetingName={meetingTitle}
-                    />
-                  </div>
+                  <RecordingControls
+                    isRecording={recordingState.isRecording}
+                    onRecordingStop={(callApi = true) => handleRecordingStop(callApi)}
+                    onRecordingStart={handleRecordingStart}
+                    onTranscriptReceived={() => { }} // Not actually used by RecordingControls
+                    onStopInitiated={() => setIsStopping(true)}
+                    onTranscriptionError={(message) => {
+                      showModal('errorAlert', message);
+                    }}
+                    isRecordingDisabled={isRecordingDisabled}
+                    isParentProcessing={isProcessingStop}
+                    selectedDevices={selectedDevices}
+                    meetingName={meetingTitle}
+                  />
                   {(recordingState.isRecording || liveActionChips.hasActivity) && (
                     <>
                       <LiveActionChips {...liveActionChips} />
@@ -298,7 +284,7 @@ export default function Home() {
                     type="button"
                     variant={showLiveInsights ? 'default' : 'outline'}
                     size="icon"
-                    className={cn('rounded-full shadow-lg h-9 w-9', !showLiveInsights && 'bg-white')}
+                    className={cn('rounded-full h-9 w-9', !showLiveInsights && 'glass-pill')}
                     onClick={() => setShowLiveInsights(prev => !prev)}
                     title={showLiveInsights ? 'Hide Live Insights' : 'Show Live Insights'}
                   >

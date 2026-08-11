@@ -3,6 +3,7 @@
 import { motion } from 'framer-motion';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useEffect, useState } from 'react';
+import { cn } from '@/lib/utils';
 
 interface RecordingStatusBarProps {
   isPaused?: boolean;
@@ -36,11 +37,14 @@ export const RecordingStatusBar: React.FC<RecordingStatusBarProps> = ({ isPaused
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -10 }}
       transition={{ duration: 0.2 }}
-      className="flex items-center gap-2 px-3 py-2 bg-gray-50 rounded-lg mb-2"
+      className={cn(
+        'glass-pill inline-flex w-fit items-center gap-2 px-3 py-1.5 mb-2',
+        isPaused ? 'border-border/10' : 'border-destructive/30 bg-destructive/15'
+      )}
     >
-      <div className={`w-2 h-2 rounded-full ${isPaused ? 'bg-orange-500' : 'bg-red-500 animate-pulse'}`} />
-      <span className={`text-sm ${isPaused ? 'text-orange-700' : 'text-gray-700'}`}>
-        {isPaused ? 'Paused' : 'Recording'} • {formatDuration(displaySeconds)}
+      <div className={cn('w-2 h-2 rounded-full', isPaused ? 'bg-muted-foreground' : 'bg-destructive animate-rec-pulse')} />
+      <span className={cn('text-sm font-mono', isPaused ? 'text-muted-foreground' : 'text-destructive')}>
+        {isPaused ? 'Paused' : 'Recording'} · {formatDuration(displaySeconds)}
       </span>
     </motion.div>
   );

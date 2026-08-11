@@ -189,7 +189,7 @@ export function LiveActionChipModelPicker({ override, onOverrideChange }: LiveAc
           type="button"
           variant={override ? 'default' : 'outline'}
           size="icon"
-          className={cn('rounded-full shadow-lg h-9 w-9', !override && 'bg-white')}
+          className={cn('rounded-full h-9 w-9', !override && 'glass-pill')}
           title={override ? `Live chip model: ${providerLabel(override.provider)} · ${override.modelName}` : 'Choose live chip model'}
         >
           <SlidersHorizontal className="w-4 h-4" />
@@ -197,8 +197,8 @@ export function LiveActionChipModelPicker({ override, onOverrideChange }: LiveAc
       </PopoverTrigger>
       <PopoverContent className="w-72 space-y-3 text-sm" align="end" sideOffset={8}>
         <div>
-          <p className="text-xs font-medium text-gray-500 mb-1">Live chip model</p>
-          <p className="text-xs text-gray-400">
+          <p className="text-xs font-medium text-muted-foreground mb-1">Live chip model</p>
+          <p className="text-xs text-muted-foreground">
             {override
               ? `Overriding: ${providerLabel(override.provider)} · ${override.modelName}`
               : `Using Settings default (${modelConfig.provider} · ${modelConfig.model || 'default'})`}

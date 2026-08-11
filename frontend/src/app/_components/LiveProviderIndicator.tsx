@@ -40,8 +40,8 @@ export function LiveProviderIndicator({ provider, className }: LiveProviderIndic
             className={cn(
               'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium whitespace-nowrap',
               isLocal
-                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                : 'border-amber-200 bg-amber-50 text-amber-700',
+                ? 'border-success/20 bg-success/10 text-success'
+                : 'border-border/10 bg-secondary/10 text-muted-foreground',
               className
             )}
           >
