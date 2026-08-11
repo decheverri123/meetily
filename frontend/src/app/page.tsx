@@ -17,6 +17,7 @@ import Analytics from '@/lib/analytics';
 import { SettingsModals } from './_components/SettingsModal';
 import { TranscriptPanel } from './_components/TranscriptPanel';
 import { LiveInsightsPanel } from './_components/LiveInsightsPanel';
+import { LiveAskPanel } from './_components/LiveAskPanel';
 import { LiveActionChips } from './_components/LiveActionChips';
 import { LiveActionChipModelPicker } from './_components/LiveActionChipModelPicker';
 import { LiveProviderIndicator } from './_components/LiveProviderIndicator';
@@ -257,6 +258,15 @@ export default function Home() {
                 isStopping={isStopping}
                 showModal={showModal}
               />
+              {/* Docked below the (scrolling) transcript, inside its column so the
+                  showLiveInsights width split still applies. pb-28 clears the
+                  floating transport bar, which is fixed at bottom-12 (48px) and
+                  ~56px tall. */}
+              <div className="shrink-0 flex justify-center px-4 pb-28 pt-2">
+                <div className="w-full max-w-[750px]">
+                  <LiveAskPanel />
+                </div>
+              </div>
             </div>
 
             {showLiveInsights && (

@@ -41,7 +41,7 @@ export function GlobalAskPanel() {
       </div>
       {error && (
         <p
-          className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5"
+          className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-md px-2 py-1.5"
           aria-live="polite"
         >
           {error}
@@ -49,7 +49,7 @@ export function GlobalAskPanel() {
       )}
       {answer && (
         <div
-          className="text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded-md px-2 py-1.5 whitespace-pre-wrap max-h-40 overflow-y-auto"
+          className="text-xs text-foreground/80 bg-secondary/5 border border-border/10 rounded-md px-2 py-1.5 whitespace-pre-wrap max-h-40 overflow-y-auto"
           aria-live="polite"
         >
           {answer}

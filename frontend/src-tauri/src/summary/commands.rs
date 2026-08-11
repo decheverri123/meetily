@@ -483,6 +483,14 @@ const ASK_MEETING_CONTEXT_MAX_CHARS: usize = 40_000;
 /// provider models.
 const ASK_ACROSS_MEETINGS_CONTEXT_MAX_CHARS: usize = 100_000;
 
+/// Bound (Unicode chars) on the in-progress transcript context built for
+/// `ask_about_live_transcript`, mirroring `ASK_MEETING_CONTEXT_MAX_CHARS`
+/// above - a live meeting's transcript is the same kind (and scale) of
+/// single-meeting context, just still growing. Overflow keeps the most
+/// recent portion rather than the oldest: mid-meeting, what was just said
+/// is what a question is most likely about.
+const ASK_LIVE_TRANSCRIPT_CONTEXT_MAX_CHARS: usize = 40_000;
+
 const ASK_ABOUT_MEETING_SYSTEM_PROMPT: &str = "You are answering a question about a specific \
 meeting using its transcript and/or summary as context. Answer only from the provided context. \
 If the answer isn't in the context, say so plainly.";
@@ -491,6 +499,12 @@ const ASK_ACROSS_MEETINGS_SYSTEM_PROMPT: &str = "You are answering a question th
 multiple meetings, using each meeting's summary as context. When relevant, mention which \
 meeting(s) support your answer by title. If the answer isn't in the provided meetings, say so \
 plainly.";
+
+const ASK_LIVE_TRANSCRIPT_SYSTEM_PROMPT: &str = "You are answering a question about a meeting \
+that is currently IN PROGRESS, using the transcript captured so far as context. That transcript \
+may be partial or incomplete, and the rest of the meeting has not happened yet. Answer only from \
+the provided context. If the answer isn't in it yet, say so plainly rather than speculating \
+about what has not been said.";
 
 /// Validates a user-submitted question: non-empty after trimming, and no
 /// longer than `ASK_QUESTION_MAX_CHARS`. Returns the trimmed question on
@@ -569,6 +583,28 @@ fn build_meeting_question_context(
     }
 
     sections.join("\n\n")
+}
+
+/// Builds the LLM context block for `ask_about_live_transcript` from the
+/// transcript captured so far, bounded to `max_chars` Unicode characters via
+/// `take_last_chars` (keeping the tail, i.e. the most recent speech). An
+/// empty/whitespace-only transcript is an `Err` rather than an empty context:
+/// there is nothing to answer from yet, and sending the LLM a contextless
+/// prompt would just invite a hallucinated answer. Pure/sync - unit-testable
+/// without a DB or network.
+fn build_live_transcript_context(transcript: &str, max_chars: usize) -> Result<String, String> {
+    let transcript = transcript.trim();
+    if transcript.is_empty() {
+        return Err("No transcript yet - start speaking and try again.".to_string());
+    }
+
+    let excerpt = take_last_chars(transcript, max_chars);
+    let label = if excerpt.chars().count() < transcript.chars().count() {
+        "Transcript so far (most recent portion):"
+    } else {
+        "Transcript so far:"
+    };
+    Ok(format!("{}\n{}", label, excerpt))
 }
 
 /// Builds the multi-meeting LLM context block for `ask_across_meetings` from
@@ -903,6 +939,39 @@ pub async fn ask_about_meeting<R: Runtime>(
     ask_configured_llm(&app, ASK_ABOUT_MEETING_SYSTEM_PROMPT, &user_prompt).await
 }
 
+/// Answers a free-text question about the meeting currently being recorded,
+/// from the in-progress transcript passed in by the frontend.
+///
+/// Deliberately touches no database, unlike `ask_about_meeting` above: while
+/// recording, the meeting exists only as client-side state (an IndexedDB key
+/// minted in `TranscriptContext`), with no row written until the recording is
+/// saved - so a `get_meeting_metadata` lookup would miss on every question.
+/// The transcript therefore arrives as an argument rather than being read
+/// back out of storage.
+#[tauri::command]
+pub async fn ask_about_live_transcript<R: Runtime>(
+    app: AppHandle<R>,
+    transcript: String,
+    question: String,
+) -> Result<String, String> {
+    log_info!(
+        "ask_about_live_transcript called (transcript_chars: {})",
+        transcript.chars().count()
+    );
+
+    let question = validate_ask_question(&question)?;
+
+    let context = build_live_transcript_context(&transcript, ASK_LIVE_TRANSCRIPT_CONTEXT_MAX_CHARS)
+        .map_err(|e| {
+            log_warn!("ask_about_live_transcript: {}", e);
+            e
+        })?;
+
+    let user_prompt = format!("{}\n\nQuestion: {}", context, question);
+
+    ask_configured_llm(&app, ASK_LIVE_TRANSCRIPT_SYSTEM_PROMPT, &user_prompt).await
+}
+
 /// Answers a free-text question that may span multiple meetings, using each
 /// meeting's stored summary as context for the app's configured LLM.
 #[tauri::command]
@@ -1146,6 +1215,60 @@ mod ask_ai_tests {
         let text = "日本語のテキストです"; // multi-byte CJK characters
         let result = take_last_chars(text, 3);
         assert_eq!(result.chars().count(), 3);
+    }
+
+    #[test]
+    fn build_live_transcript_context_rejects_empty_transcript() {
+        assert!(build_live_transcript_context("", 1000).is_err());
+    }
+
+    #[test]
+    fn build_live_transcript_context_rejects_whitespace_only_transcript() {
+        assert!(build_live_transcript_context("  \n\t  ", 1000).is_err());
+    }
+
+    #[test]
+    fn build_live_transcript_context_keeps_transcript_verbatim_when_within_budget() {
+        let context = build_live_transcript_context("We agreed to ship on Friday.", 1000).unwrap();
+        assert!(context.contains("We agreed to ship on Friday."));
+        assert!(context.contains("Transcript so far:"));
+        assert!(!context.contains("most recent portion"));
+    }
+
+    #[test]
+    fn build_live_transcript_context_truncates_keeping_most_recent_portion() {
+        // "OLD" first, "NEW" last - the live window must keep the tail.
+        let transcript = format!("{}{}", "OLD".repeat(50), "NEW".repeat(50));
+        let context = build_live_transcript_context(&transcript, 150).unwrap();
+
+        assert!(
+            context.contains("Transcript so far (most recent portion):"),
+            "expected truncation label in '{}'",
+            context
+        );
+        assert!(context.ends_with(&"NEW".repeat(50)));
+        assert!(!context.contains("OLD"));
+    }
+
+    /// The live path routes its question through the same shared validator as
+    /// `ask_about_meeting` rather than a second copy of the rules, so an empty
+    /// or over-length question is rejected before any LLM call. Guards against
+    /// that wiring being replaced with a bespoke check.
+    #[test]
+    fn ask_about_live_transcript_reuses_shared_question_validation() {
+        assert!(validate_ask_question("").is_err());
+        assert!(validate_ask_question(&"a".repeat(ASK_QUESTION_MAX_CHARS + 1)).is_err());
+    }
+
+    /// Multi-byte text: the budget is a Unicode *char* count, and truncating
+    /// to it must never slice a character in half (which would panic on a
+    /// non-char-boundary index).
+    #[test]
+    fn build_live_transcript_context_counts_unicode_chars_not_bytes() {
+        let transcript = "日本語のテキストです"; // 10 chars, 30 bytes
+        let context = build_live_transcript_context(transcript, 3).unwrap();
+        assert!(context.ends_with("トです"));
+        assert!(!context.contains("日本語"));
     }
 
     // -------------------------------------------------------------------
