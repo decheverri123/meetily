@@ -153,9 +153,7 @@ export function RetranscribeDialog({
             });
 
             setIsProcessing(false);
-            toast.success(
-              `Retranscription complete! ${event.payload.segments_count} segments created.`
-            );
+            toast.success('Retranscription complete!');
             onCompleteRef.current?.();
             onOpenChangeRef.current(false);
           }

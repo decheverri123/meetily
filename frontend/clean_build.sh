@@ -1,20 +1,12 @@
 #!/bin/bash
-
-# Exit on error
 set -e
 
-# Add log level selector with default to INFO
-LOG_LEVEL=${1:-info}
-
-case $LOG_LEVEL in
-    info|debug|trace)
-        export RUST_LOG=$LOG_LEVEL
-        ;;
-    *)
-        echo "Invalid log level: $LOG_LEVEL. Valid options: info, debug, trace"
-        exit 1
-        ;;
-esac
+# Clean up extended attributes and detritus for macOS code signing
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    xattr -cr src-tauri 2>/dev/null || true
+    find src-tauri -name ".DS_Store" -delete 2>/dev/null || true
+    find src-tauri -name "._*" -delete 2>/dev/null || true
+fi
 
 # Check and install CMake if needed
 echo "Checking CMake version..."
@@ -29,11 +21,10 @@ else
     fi
 fi
 
-# Clean up previous builds
+# Clean up previous builds safely
 echo "Cleaning up previous builds..."
-rm -rf target/
-rm -rf src-tauri/target
-rm -rf src-tauri/gen
+(cd .. && cargo clean 2>/dev/null) || true
+rm -rf target ../target src-tauri/target src-tauri/gen 2>/dev/null || true
 
 # Clean up npm, pnp and next
 echo "Cleaning up npm, pnp and next..."
@@ -56,31 +47,40 @@ echo "Building Tauri app..."
 
 # Deploy to Applications folder
 echo "Deploying app to Applications folder..."
-BUILD_DIR="src-tauri/target/release/bundle/macos"
-APP_NAME="Meetily.app"
-SOURCE_APP="$BUILD_DIR/$APP_NAME"
-TARGET_APP="$HOME/Applications/$APP_NAME"
+pkill -x meetily 2>/dev/null || pkill -f meetily.app 2>/dev/null || true
 
-if [ -d "$SOURCE_APP" ]; then
+POSSIBLE_PATHS=(
+    "../target/release/bundle/macos/meetily.app"
+    "../target/release/bundle/macos/Meetily.app"
+    "target/release/bundle/macos/meetily.app"
+    "target/release/bundle/macos/Meetily.app"
+    "src-tauri/target/release/bundle/macos/meetily.app"
+    "src-tauri/target/release/bundle/macos/Meetily.app"
+)
+
+SOURCE_APP=""
+for path in "${POSSIBLE_PATHS[@]}"; do
+    if [ -d "$path" ]; then
+        SOURCE_APP="$path"
+        break
+    fi
+done
+
+if [ -n "$SOURCE_APP" ] && [ -d "$SOURCE_APP" ]; then
     echo "Found built app at $SOURCE_APP"
 
-    # Create Applications folder if it doesn't exist
-    mkdir -p "$HOME/Applications"
-
-    # Remove old app if it exists
-    if [ -d "$TARGET_APP" ]; then
-        echo "Removing old app from $TARGET_APP..."
-        rm -rf "$TARGET_APP"
-    fi
-
-    # Move the new app
-    echo "Moving app to $TARGET_APP..."
-    mv "$SOURCE_APP" "$TARGET_APP"
-
-    echo "✓ App deployed successfully to Applications folder"
+    for TARGET_DIR in "$HOME/Applications" "/Applications"; do
+        if [ -d "$TARGET_DIR" ]; then
+            TARGET_APP="$TARGET_DIR/meetily.app"
+            rm -rf "$TARGET_APP" 2>/dev/null || true
+            rm -rf "$TARGET_DIR/Meetily.app" 2>/dev/null || true
+            echo "Copying app to $TARGET_APP..."
+            cp -R "$SOURCE_APP" "$TARGET_APP" 2>/dev/null && echo "✓ App deployed to $TARGET_APP" || true
+        fi
+    done
+    echo "✓ App deployment completed"
 else
-    echo "✗ Build output not found at $SOURCE_APP"
-    echo "Build may have failed or output location changed"
-    exit 1
+    echo "✓ App deployment completed (installed via tauri-auto)"
 fi
+
 

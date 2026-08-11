@@ -105,7 +105,7 @@ export function ImportAudioDialog({
   } = useTranscriptionModels(transcriptModelConfig);
 
   const handleImportComplete = useCallback((result: ImportResult) => {
-    toast.success(`Import complete! ${result.segments_count} segments created.`);
+    toast.success('Import complete!');
 
     // Refresh meetings list then navigate to the imported meeting
     refetchMeetings();
@@ -136,7 +136,7 @@ export function ImportAudioDialog({
   });
 
   const handleYoutubeImportComplete = useCallback((result: YoutubeImportResult) => {
-    toast.success(`Import complete! ${result.segments_count} segments created.`);
+    toast.success('Import complete!');
 
     refetchMeetings();
     onComplete?.();

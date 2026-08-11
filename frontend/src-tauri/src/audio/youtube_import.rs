@@ -54,6 +54,7 @@ const YT_DLP_EXECUTABLE_NAME: &str = "yt-dlp.exe";
 const YT_DLP_NOT_FOUND_MSG: &str = "yt-dlp not found. Install it and ensure it's on your PATH (e.g. 'brew install yt-dlp' on macOS). See https://github.com/yt-dlp/yt-dlp#installation";
 
 static YT_DLP_PATH: Lazy<Option<PathBuf>> = Lazy::new(find_yt_dlp_path_internal);
+static JS_RUNTIME_ARG: Lazy<Option<String>> = Lazy::new(find_js_runtime_internal);
 
 /// Find yt-dlp on PATH (or common fallback install dirs). yt-dlp is a required
 /// external dependency: it is never bundled or auto-installed by this app, unlike
@@ -95,6 +96,103 @@ fn find_yt_dlp_path_internal() -> Option<PathBuf> {
 
     debug!("yt-dlp not found in PATH or any fallback directory");
     None
+}
+
+/// Detect an available JS runtime for yt-dlp (node, deno, bun, quickjs)
+fn find_js_runtime_internal() -> Option<String> {
+    let candidate_names = ["node", "deno", "bun", "quickjs"];
+    for name in candidate_names {
+        if let Ok(path) = which(name) {
+            debug!("Found JS runtime for yt-dlp in PATH: {} -> {:?}", name, path);
+            return Some(format!("{}:{}", name, path.to_string_lossy()));
+        }
+    }
+
+    let mut fallback_dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        fallback_dirs.push(PathBuf::from(&home).join(".nvm"));
+        fallback_dirs.push(PathBuf::from(&home).join(".bun").join("bin"));
+        fallback_dirs.push(PathBuf::from(&home).join(".deno").join("bin"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        fallback_dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        fallback_dirs.push(PathBuf::from("/usr/local/bin"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        fallback_dirs.push(PathBuf::from("/usr/local/bin"));
+        fallback_dirs.push(PathBuf::from("/usr/bin"));
+    }
+
+    for dir in fallback_dirs {
+        for name in candidate_names {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                debug!("Found JS runtime for yt-dlp in fallback dir: {} -> {:?}", name, candidate);
+                return Some(format!("{}:{}", name, candidate.to_string_lossy()));
+            }
+        }
+    }
+
+    debug!("No JS runtime found for yt-dlp");
+    None
+}
+
+fn is_age_restriction_error(stderr: &str) -> bool {
+    stderr.contains("Sign in to confirm your age")
+        || stderr.contains("inappropriate for some users")
+        || stderr.contains("Use --cookies-from-browser")
+        || stderr.contains("pass cookies")
+}
+
+fn format_ytdlp_error(stderr: &str) -> String {
+    let raw = stderr.trim();
+    if raw.is_empty() {
+        return "Failed to process YouTube video.".to_string();
+    }
+
+    if is_age_restriction_error(raw) {
+        return "This video is age-restricted or requires sign-in. Signed-in browser cookies could not be accessed.".to_string();
+    }
+    if raw.contains("Video unavailable") {
+        return "This YouTube video is unavailable or private.".to_string();
+    }
+
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let error_lines: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.contains("ERROR:"))
+        .collect();
+
+    let selected_text = if !error_lines.is_empty() {
+        error_lines.join(" ")
+    } else {
+        lines
+            .into_iter()
+            .filter(|l| !l.starts_with("WARNING:"))
+            .collect::<Vec<&str>>()
+            .join(" ")
+    };
+
+    let re_prefix = Regex::new(r"ERROR:\s*\[[^\]]+\]\s*[^:]+:\s*").ok();
+    let cleaned = if let Some(re) = re_prefix {
+        re.replace_all(&selected_text, "").to_string()
+    } else {
+        selected_text
+    };
+
+    if cleaned.trim().is_empty() {
+        "Failed to process YouTube video.".to_string()
+    } else {
+        cleaned.trim().to_string()
+    }
 }
 
 /// Metadata about a YouTube video, fetched without downloading it.
@@ -191,17 +289,30 @@ impl Drop for YoutubeImportGuard {
     }
 }
 
+const BROWSER_COOKIE_TARGETS: &[&str] = &["chrome", "safari", "firefox", "edge", "brave"];
+
 /// Run `yt-dlp --dump-json --skip-download` and parse the result into a `YoutubeVideoInfo`.
 async fn fetch_youtube_video_info(yt_dlp_path: &Path, url: &str) -> Result<YoutubeVideoInfo, String> {
     let yt_dlp_path = yt_dlp_path.to_path_buf();
     let url = url.to_string();
+    let js_runtime = JS_RUNTIME_ARG.clone();
 
-    let output = tokio::task::spawn_blocking(move || {
+    let run_cmd = move |cookies_browser: Option<&'static str>| {
         let mut command = std::process::Command::new(&yt_dlp_path);
         command
             .arg("--dump-json")
             .arg("--skip-download")
-            .arg("--no-playlist")
+            .arg("--no-playlist");
+
+        if let Some(ref js_arg) = js_runtime {
+            command.arg("--js-runtimes").arg(js_arg);
+        }
+
+        if let Some(browser) = cookies_browser {
+            command.arg("--cookies-from-browser").arg(browser);
+        }
+
+        command
             .arg(&url)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -214,6 +325,11 @@ async fn fetch_youtube_video_info(yt_dlp_path: &Path, url: &str) -> Result<Youtu
         }
 
         command.output()
+    };
+
+    let mut output = tokio::task::spawn_blocking({
+        let run_cmd = run_cmd.clone();
+        move || run_cmd(None)
     })
     .await
     .map_err(|e| format!("yt-dlp task join error: {}", e))?
@@ -221,12 +337,24 @@ async fn fetch_youtube_video_info(yt_dlp_path: &Path, url: &str) -> Result<Youtu
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let trimmed = stderr.trim();
-        return Err(if trimmed.is_empty() {
-            format!("yt-dlp exited with status: {}", output.status)
-        } else {
-            format!("Could not fetch video info: {}", trimmed)
-        });
+        if is_age_restriction_error(&stderr) {
+            for &browser in BROWSER_COOKIE_TARGETS {
+                if let Ok(Ok(retry_output)) = tokio::task::spawn_blocking({
+                    let run_cmd = run_cmd.clone();
+                    move || run_cmd(Some(browser))
+                }).await {
+                    if retry_output.status.success() {
+                        output = retry_output;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format_ytdlp_error(&stderr));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -249,16 +377,14 @@ async fn fetch_youtube_video_info(yt_dlp_path: &Path, url: &str) -> Result<Youtu
     })
 }
 
-/// Download a YouTube video's audio as WAV into `meeting_folder/audio.wav` via yt-dlp,
-/// emitting `youtube-import-progress` events for download percentage (scaled into the
-/// 0-15% range, since the shared transcription pipeline picks up at 15%).
-async fn download_audio<R: Runtime>(
+async fn execute_ytdlp_download<R: Runtime>(
     app: &AppHandle<R>,
     yt_dlp_path: &Path,
     ffmpeg_path: &Path,
     url: &str,
     meeting_folder: &Path,
-) -> Result<PathBuf, String> {
+    cookies_browser: Option<&'static str>,
+) -> Result<(std::process::ExitStatus, String), String> {
     let output_template = meeting_folder.join("audio.%(ext)s");
 
     let mut command = tokio::process::Command::new(yt_dlp_path);
@@ -271,7 +397,17 @@ async fn download_audio<R: Runtime>(
         .arg("--ffmpeg-location")
         .arg(ffmpeg_path)
         .arg("--newline")
-        .arg("--no-playlist")
+        .arg("--no-playlist");
+
+    if let Some(ref js_arg) = *JS_RUNTIME_ARG {
+        command.arg("--js-runtimes").arg(js_arg);
+    }
+
+    if let Some(browser) = cookies_browser {
+        command.arg("--cookies-from-browser").arg(browser);
+    }
+
+    command
         .arg("-o")
         .arg(&output_template)
         .arg(url)
@@ -327,7 +463,6 @@ async fn download_audio<R: Runtime>(
         }
     }
 
-    // yt-dlp's stdout has closed (process exited, or was killed by cancellation).
     let child_opt = {
         let mut guard = YOUTUBE_IMPORT_CHILD.lock().unwrap_or_else(|e| e.into_inner());
         guard.take()
@@ -342,18 +477,49 @@ async fn download_audio<R: Runtime>(
     };
 
     let stderr_output = stderr_task.await.unwrap_or_default();
+    Ok((status, stderr_output))
+}
+
+/// Download a YouTube video's audio as WAV into `meeting_folder/audio.wav` via yt-dlp,
+/// emitting `youtube-import-progress` events for download percentage (scaled into the
+/// 0-15% range, since the shared transcription pipeline picks up at 15%).
+async fn download_audio<R: Runtime>(
+    app: &AppHandle<R>,
+    yt_dlp_path: &Path,
+    ffmpeg_path: &Path,
+    url: &str,
+    meeting_folder: &Path,
+) -> Result<PathBuf, String> {
+    let (mut status, mut stderr_output) =
+        execute_ytdlp_download(app, yt_dlp_path, ffmpeg_path, url, meeting_folder, None).await?;
+
+    if YOUTUBE_IMPORT_CANCELLED.load(Ordering::SeqCst) {
+        return Err("YouTube import cancelled".to_string());
+    }
+
+    if !status.success() && is_age_restriction_error(&stderr_output) {
+        for &browser in BROWSER_COOKIE_TARGETS {
+            if YOUTUBE_IMPORT_CANCELLED.load(Ordering::SeqCst) {
+                return Err("YouTube import cancelled".to_string());
+            }
+            if let Ok((retry_status, retry_stderr)) =
+                execute_ytdlp_download(app, yt_dlp_path, ffmpeg_path, url, meeting_folder, Some(browser)).await
+            {
+                if retry_status.success() {
+                    status = retry_status;
+                    stderr_output = retry_stderr;
+                    break;
+                }
+            }
+        }
+    }
 
     if YOUTUBE_IMPORT_CANCELLED.load(Ordering::SeqCst) {
         return Err("YouTube import cancelled".to_string());
     }
 
     if !status.success() {
-        let trimmed = stderr_output.trim();
-        return Err(if trimmed.is_empty() {
-            format!("yt-dlp exited with status: {}", status)
-        } else {
-            format!("yt-dlp failed: {}", trimmed)
-        });
+        return Err(format_ytdlp_error(&stderr_output));
     }
 
     let audio_path = meeting_folder.join("audio.wav");
@@ -1032,5 +1198,21 @@ mod tests {
             parse_ytdlp_progress_percentage("[download]  42,3% of ~10.00MiB at 1.20MiB/s"),
             None
         );
+    }
+
+    #[test]
+    fn test_format_ytdlp_error_filters_warning_and_formats_age_gate() {
+        let stderr = "WARNING: [youtube] No supported JavaScript runtime could be found.\nERROR: [youtube] m5NTKNuSyF0: Sign in to confirm your age. This video may be inappropriate for some users.";
+        assert!(is_age_restriction_error(stderr));
+        let formatted = format_ytdlp_error(stderr);
+        assert!(formatted.contains("age-restricted"));
+        assert!(!formatted.contains("WARNING"));
+    }
+
+    #[test]
+    fn test_format_ytdlp_error_strips_prefix() {
+        let stderr = "WARNING: [youtube] Some warning\nERROR: [youtube] abc1234: Video unavailable";
+        let formatted = format_ytdlp_error(stderr);
+        assert_eq!(formatted, "This YouTube video is unavailable or private.");
     }
 }

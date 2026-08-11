@@ -59,7 +59,7 @@ pub mod youtube_import;
 
 pub use devices::{
     default_input_device, default_output_device, get_device_and_config, list_audio_devices,
-    parse_audio_device, trigger_audio_permission,
+    parse_audio_device, stabilize_microphone, trigger_audio_permission,
     AudioDevice, AudioTranscriptionEngine, DeviceControl, DeviceType,
     LAST_AUDIO_CAPTURE,
 };

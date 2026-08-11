@@ -26,6 +26,60 @@ use super::microphone::{default_input_device, find_builtin_input_device};
 use super::speakers::default_output_device;
 use crate::audio::device_detection::InputDeviceKind;
 
+/// Which microphone to open once a candidate has been classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicChoice {
+    /// Open the candidate device as-is
+    UseCandidate,
+    /// Open the built-in microphone instead
+    UseBuiltin,
+}
+
+/// Decide whether a candidate microphone should be swapped for the built-in one.
+///
+/// Opening a Bluetooth microphone forces macOS to renegotiate the headset from
+/// A2DP to HFP, which drops playback to mono at 16-24kHz for as long as the
+/// input stream is open. Recording from the built-in mic keeps the headset in
+/// A2DP so the user's audio stays intact.
+pub fn decide_microphone(kind: InputDeviceKind, builtin_available: bool) -> MicChoice {
+    if kind.is_bluetooth() && builtin_available {
+        MicChoice::UseBuiltin
+    } else {
+        MicChoice::UseCandidate
+    }
+}
+
+/// Swap a Bluetooth microphone for the built-in one, keeping the headset in A2DP.
+///
+/// Returns the candidate unchanged when it is not Bluetooth, or when no built-in
+/// microphone exists to fall back to.
+pub fn stabilize_microphone(candidate: &AudioDevice) -> Result<AudioDevice> {
+    let kind = InputDeviceKind::detect(&candidate.name, 512, 48000);
+    let builtin = if kind.is_bluetooth() {
+        find_builtin_input_device()?
+    } else {
+        None
+    };
+
+    match (decide_microphone(kind, builtin.is_some()), builtin) {
+        (MicChoice::UseBuiltin, Some(builtin)) => {
+            warn!("🎧 Bluetooth microphone detected: '{}'", candidate.name);
+            info!("→ ✅ Overriding to built-in microphone: '{}'", builtin.name);
+            info!("   Keeps the headset in A2DP so playback quality is preserved");
+            Ok(builtin)
+        }
+        _ => {
+            if kind.is_bluetooth() {
+                warn!("🎧 Bluetooth microphone '{}' in use - no built-in fallback available", candidate.name);
+                warn!("   Playback through this headset will drop to call quality while recording");
+            } else {
+                info!("✅ Using wired/built-in microphone: '{}' (device type: {:?})", candidate.name, kind);
+            }
+            Ok(candidate.clone())
+        }
+    }
+}
+
 /// Get safe recording devices with automatic Bluetooth fallback (macOS-specific)
 ///
 /// This function intelligently selects audio devices for recording on macOS:
@@ -69,37 +123,12 @@ pub fn get_safe_recording_devices_macos() -> Result<(Option<AudioDevice>, Option
     let default_speaker = default_output_device().ok();
 
     // Step 2: Process microphone with Bluetooth override
-    let final_mic = if let Some(ref mic) = default_mic {
-        // Detect if microphone is Bluetooth
-        // Use placeholder buffer_size/sample_rate (detection uses name + Core Audio API primarily)
-        let device_kind = InputDeviceKind::detect(&mic.name, 512, 48000);
-
-        if device_kind.is_bluetooth() {
-            warn!("🎧 Bluetooth microphone detected: '{}'", mic.name);
-            warn!("   Bluetooth introduces variable sample rates with Core Audio");
-
-            // Try to find built-in microphone as fallback
-            match find_builtin_input_device()? {
-                Some(builtin_mic) => {
-                    info!("→ ✅ Overriding to stable built-in microphone: '{}'", builtin_mic.name);
-                    info!("   Built-in provides consistent sample rates for reliable mixing");
-                    Some(builtin_mic)
-                }
-                None => {
-                    warn!("→ ⚠️ No built-in microphone found - using Bluetooth anyway");
-                    warn!("   Recording may experience sample rate sync issues");
-                    warn!("   Consider using wired microphone for better stability");
-                    Some(mic.clone())
-                }
-            }
-        } else {
-            // Not Bluetooth - use as-is
-            info!("✅ Using wired/built-in microphone: '{}' (device type: {:?})", mic.name, device_kind);
-            Some(mic.clone())
+    let final_mic = match default_mic {
+        Some(mic) => Some(stabilize_microphone(&mic)?),
+        None => {
+            warn!("⚠️ No default microphone found");
+            None
         }
-    } else {
-        warn!("⚠️ No default microphone found");
-        None
     };
 
     // Step 3: Process speaker/system audio - KEEP AS-IS (macOS-specific behavior)
@@ -168,19 +197,34 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(target_os = "macos")]
-    fn test_bluetooth_override_logic() {
-        // This test verifies the logic but requires actual audio devices
-        // Run manually on macOS development machines to verify behavior
+    fn bluetooth_mic_is_swapped_for_builtin_when_one_exists() {
+        assert_eq!(
+            decide_microphone(InputDeviceKind::Bluetooth, true),
+            MicChoice::UseBuiltin
+        );
+    }
 
-        // Expected behavior when AirPods connected as default:
-        // - Should detect Bluetooth via Core Audio API or name heuristics
-        // - Should find built-in MacBook microphone
-        // - Should override to built-in for recording
-        // - Each device (mic and speaker) evaluated independently
+    #[test]
+    fn bluetooth_mic_is_kept_when_no_builtin_exists() {
+        assert_eq!(
+            decide_microphone(InputDeviceKind::Bluetooth, false),
+            MicChoice::UseCandidate
+        );
+    }
 
-        // Expected behavior when built-in mic is default:
-        // - Should detect as Wired via Core Audio
-        // - Should use built-in directly (no override needed)
+    #[test]
+    fn wired_mic_is_never_swapped() {
+        assert_eq!(
+            decide_microphone(InputDeviceKind::Wired, true),
+            MicChoice::UseCandidate
+        );
+    }
+
+    #[test]
+    fn unknown_mic_is_never_swapped() {
+        assert_eq!(
+            decide_microphone(InputDeviceKind::Unknown, true),
+            MicChoice::UseCandidate
+        );
     }
 }

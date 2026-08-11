@@ -18,10 +18,13 @@ use super::{
     parse_audio_device,
     default_input_device,   // Get default microphone
     default_output_device,  // Get default system audio
+    AudioDevice,
     RecordingManager,
     DeviceEvent,
     DeviceMonitorType
 };
+#[cfg(target_os = "macos")]
+use super::stabilize_microphone;
 
 // Import transcription modules
 use super::transcription::{
@@ -158,6 +161,25 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // ============================================================================
     // MICROPHONE DEVICE RESOLUTION: Preference → Default → Error
     // ============================================================================
+    // Applied only to auto-selected microphones: an explicit user preference is
+    // honoured even when it costs headset playback quality.
+    fn stabilize_auto_selected_mic(device: AudioDevice) -> AudioDevice {
+        #[cfg(target_os = "macos")]
+        {
+            match stabilize_microphone(&device) {
+                Ok(stable) => stable,
+                Err(e) => {
+                    warn!("⚠️ Bluetooth microphone check failed: {} - using '{}'", e, device.name);
+                    device
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            device
+        }
+    }
+
     let microphone_device = match preferred_mic_name {
         Some(pref_name) => {
             info!("🎤 Attempting to use preferred microphone: '{}'", pref_name);
@@ -171,6 +193,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                     warn!("   Falling back to system default microphone...");
                     match default_input_device() {
                         Ok(device) => {
+                            let device = stabilize_auto_selected_mic(device);
                             info!("✅ Using default microphone: '{}'", device.name);
                             Some(Arc::new(device))
                         }
@@ -189,6 +212,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
             info!("🎤 No microphone preference set, using system default");
             match default_input_device() {
                 Ok(device) => {
+                    let device = stabilize_auto_selected_mic(device);
                     info!("✅ Using default microphone: '{}'", device.name);
                     Some(Arc::new(device))
                 }

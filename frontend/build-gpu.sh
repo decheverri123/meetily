@@ -174,6 +174,13 @@ fi
 echo -e "${BLUE}Building complete Tauri application...${NC}"
 echo ""
 
+# Clean macOS detritus to prevent code signing issues
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    xattr -cr "$FRONTEND_DIR/src-tauri" 2>/dev/null || true
+    find "$FRONTEND_DIR/src-tauri" -name ".DS_Store" -delete 2>/dev/null || true
+    find "$FRONTEND_DIR/src-tauri" -name "._*" -delete 2>/dev/null || true
+fi
+
 # NO_STRIP true due to issues with bundling appImage
 NO_STRIP=true $PKG_MGR run tauri:build
 

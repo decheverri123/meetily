@@ -79,29 +79,33 @@ if (command === 'build' && platform === 'darwin') {
 
   if (appPath) {
     const appName = path.basename(appPath);
-    const userAppsDir = path.join(os.homedir(), 'Applications');
-    if (!fs.existsSync(userAppsDir)) {
-      fs.mkdirSync(userAppsDir, { recursive: true });
-    }
+    console.log(`\n🚚 Installing ${appName}...`);
 
-    const destPath = path.join(userAppsDir, appName);
-    console.log(`\n🚚 Installing ${appName} to ${userAppsDir}...`);
+    // Terminate any running instances so the app is reloaded cleanly
     try {
-      // Remove old versions
-      try {
-        fs.rmSync(path.join(userAppsDir, appName), { recursive: true, force: true });
-        fs.rmSync(path.join(userAppsDir, 'meetily.app'), { recursive: true, force: true });
-        fs.rmSync(path.join(userAppsDir, 'Meetily.app'), { recursive: true, force: true });
-      } catch (_) {
-        // Ignore if nothing to remove
+      execSync('pkill -x meetily 2>/dev/null || pkill -f meetily.app 2>/dev/null || true', { stdio: 'ignore' });
+    } catch (_) {}
+
+    const targetDirs = [
+      '/Applications',
+      path.join(os.homedir(), 'Applications')
+    ];
+
+    for (const targetDir of targetDirs) {
+      if (!fs.existsSync(targetDir)) {
+        try { fs.mkdirSync(targetDir, { recursive: true }); } catch (_) {}
       }
-      // Copy without sudo
-      execSync(`cp -R "${appPath}" "${userAppsDir}/"`, { stdio: 'inherit' });
-      console.log(`✅ Successfully replaced ${destPath}\n`);
-    } catch (copyErr) {
-      console.error(`⚠️ Failed to install ${appName} to ${userAppsDir}:`, copyErr.message);
-      process.exit(1);
+      const destPath = path.join(targetDir, appName);
+      try {
+        fs.rmSync(path.join(targetDir, 'meetily.app'), { recursive: true, force: true });
+        fs.rmSync(path.join(targetDir, 'Meetily.app'), { recursive: true, force: true });
+        execSync(`cp -R "${appPath}" "${targetDir}/"`, { stdio: 'ignore' });
+        console.log(`✅ Successfully updated ${destPath}`);
+      } catch (copyErr) {
+        console.warn(`⚠️ Could not update ${destPath}:`, copyErr.message);
+      }
     }
+    console.log('');
   } else {
     console.warn('\n⚠️ Could not find built meetily.app bundle to install to Applications');
     process.exit(1);
