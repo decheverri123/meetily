@@ -423,7 +423,8 @@ mod tests {
     #[test]
     fn build_transcript_excerpt_bounds_long_transcript() {
         let word = "word ";
-        let transcript = word.repeat(5000); // Well beyond the excerpt token budget.
+        // Well beyond the excerpt token budget.
+        let transcript = word.repeat(5000);
         let excerpt = build_transcript_excerpt(&transcript);
         assert!(excerpt.len() < transcript.len());
         assert!(excerpt.contains("[...transcript truncated...]"));
