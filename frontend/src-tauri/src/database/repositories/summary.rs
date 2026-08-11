@@ -2,6 +2,7 @@ use crate::database::models::SummaryProcess;
 use chrono::Utc;
 use serde_json::Value;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use tracing::{error, info as log_info};
 
 pub struct SummaryProcessesRepository;
@@ -80,6 +81,41 @@ impl SummaryProcessesRepository {
         .bind(meeting_id)
         .fetch_optional(pool)
         .await
+    }
+
+    /// Batched counterpart to `get_summary_data_for_meeting`'s `result` field:
+    /// fetches the raw (still-JSON) `result` for every meeting_id in
+    /// `meeting_ids` in a single `IN (...)` query instead of one query per
+    /// meeting. Keeps the same `JOIN transcript_chunks` requirement
+    /// `get_summary_data_for_meeting` uses, so a meeting is only included
+    /// here if it also would have been by the single-meeting lookup.
+    /// Meetings with no summary_processes row, no transcript_chunks row, or
+    /// a NULL `result`, are simply absent from the returned map. Callers
+    /// that need the parsed markdown (not the raw JSON) still do that
+    /// extraction themselves, same as the single-meeting path.
+    pub async fn get_summary_results_for_meetings(
+        pool: &SqlitePool,
+        meeting_ids: &[String],
+    ) -> Result<HashMap<String, String>, sqlx::Error> {
+        if meeting_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let placeholders = vec!["?"; meeting_ids.len()].join(",");
+        let query = format!(
+            "SELECT p.meeting_id, p.result FROM summary_processes p \
+             JOIN transcript_chunks t ON p.meeting_id = t.meeting_id \
+             WHERE p.meeting_id IN ({}) AND p.result IS NOT NULL",
+            placeholders
+        );
+
+        let mut q = sqlx::query_as::<_, (String, String)>(&query);
+        for id in meeting_ids {
+            q = q.bind(id);
+        }
+        let rows = q.fetch_all(pool).await?;
+
+        Ok(rows.into_iter().collect())
     }
 
     pub async fn create_or_reset_process(
@@ -217,5 +253,108 @@ impl SummaryProcessesRepository {
             meeting_id
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::repositories::test_support::{insert_meeting, setup_pool};
+
+    async fn insert_summary_result(pool: &SqlitePool, meeting_id: &str, result: Option<&str>) {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO summary_processes (meeting_id, status, created_at, updated_at, result) \
+             VALUES (?, 'completed', ?, ?, ?)",
+        )
+        .bind(meeting_id)
+        .bind(now)
+        .bind(now)
+        .bind(result)
+        .execute(pool)
+        .await
+        .expect("failed to insert summary_processes row");
+    }
+
+    async fn insert_transcript_chunk(pool: &SqlitePool, meeting_id: &str) {
+        sqlx::query(
+            "INSERT INTO transcript_chunks (meeting_id, transcript_text, model, model_name, created_at) \
+             VALUES (?, 'text', 'ollama', 'llama3', ?)",
+        )
+        .bind(meeting_id)
+        .bind(Utc::now())
+        .execute(pool)
+        .await
+        .expect("failed to insert transcript_chunks row");
+    }
+
+    /// Verifies the batched `get_summary_results_for_meetings` returns
+    /// exactly what the old N+1 per-meeting loop (calling
+    /// `get_summary_data_for_meeting` once per id and reading `.result`)
+    /// would have produced, across the mix of cases `ask_across_meetings`
+    /// actually hits: a meeting with a summary, one whose summary_processes
+    /// row has a NULL result, one with no summary_processes row at all, and
+    /// - matching `get_summary_data_for_meeting`'s existing
+    /// `JOIN transcript_chunks` requirement - one with a non-NULL result but
+    /// no transcript_chunks row.
+    #[tokio::test]
+    async fn get_summary_results_for_meetings_matches_per_meeting_loop() {
+        let pool = setup_pool().await;
+
+        for id in ["m1", "m2", "m3", "m4", "m5"] {
+            insert_meeting(&pool, id).await;
+        }
+
+        insert_summary_result(&pool, "m1", Some(r#"{"markdown":"Summary one"}"#)).await;
+        insert_summary_result(&pool, "m2", Some(r#"{"markdown":"Summary two"}"#)).await;
+        insert_summary_result(&pool, "m3", None).await;
+        // m4: no summary_processes row at all.
+        insert_summary_result(&pool, "m5", Some(r#"{"markdown":"Summary five"}"#)).await;
+
+        // Only meetings expected to survive the JOIN get a transcript_chunks row.
+        insert_transcript_chunk(&pool, "m1").await;
+        insert_transcript_chunk(&pool, "m2").await;
+        insert_transcript_chunk(&pool, "m3").await;
+        // m5 deliberately has no transcript_chunks row.
+
+        let meeting_ids: Vec<String> = ["m1", "m2", "m3", "m4", "m5"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let mut expected: HashMap<String, String> = HashMap::new();
+        for id in &meeting_ids {
+            if let Some(process) =
+                SummaryProcessesRepository::get_summary_data_for_meeting(&pool, id)
+                    .await
+                    .expect("get_summary_data_for_meeting failed")
+            {
+                if let Some(result) = process.result {
+                    expected.insert(id.clone(), result);
+                }
+            }
+        }
+
+        let actual =
+            SummaryProcessesRepository::get_summary_results_for_meetings(&pool, &meeting_ids)
+                .await
+                .expect("get_summary_results_for_meetings failed");
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 2);
+        assert_eq!(actual.get("m1").unwrap(), r#"{"markdown":"Summary one"}"#);
+        assert_eq!(actual.get("m2").unwrap(), r#"{"markdown":"Summary two"}"#);
+        assert!(!actual.contains_key("m3"));
+        assert!(!actual.contains_key("m4"));
+        assert!(!actual.contains_key("m5"));
+    }
+
+    #[tokio::test]
+    async fn get_summary_results_for_meetings_empty_input_returns_empty_map() {
+        let pool = setup_pool().await;
+        let actual = SummaryProcessesRepository::get_summary_results_for_meetings(&pool, &[])
+            .await
+            .expect("query failed");
+        assert!(actual.is_empty());
     }
 }

@@ -673,6 +673,9 @@ pub fn run() {
             summary::commands::api_save_meeting_detected_summary_language,
             summary::commands::api_detect_transcript_summary_language,
             summary::commands::api_cancel_summary,
+            // Free-text meeting Q&A ("ask about this meeting" / "ask across meetings")
+            summary::commands::ask_about_meeting,
+            summary::commands::ask_across_meetings,
             // Template commands
             summary::template_commands::api_list_templates,
             summary::template_commands::api_get_template_details,

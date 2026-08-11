@@ -27,6 +27,7 @@ import { VisuallyHidden } from "@/components/ui/visually-hidden"
 
 import { MessageToast } from '../MessageToast';
 import Logo from '../Logo';
+import { GlobalAskPanel } from './GlobalAskPanel';
 import Info from '../Info';
 import { ComplianceNotification } from '../ComplianceNotification';
 import { Input } from '../ui/input';
@@ -713,6 +714,8 @@ const Sidebar: React.FC = () => {
                     }
                   </InputGroup>
                 </div>
+
+                <GlobalAskPanel />
               </div>
             )}
           </div>

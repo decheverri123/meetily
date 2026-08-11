@@ -1541,7 +1541,13 @@ fn commit_rate_limit_slot(last_call: &Mutex<Option<std::time::Instant>>) {
 /// from `api_get_model_config`) a failed config lookup - preserving the
 /// pre-existing "always use the local sidecar" behavior as the safe default
 /// whenever the user hasn't (successfully) configured anything else.
-fn resolve_live_llm_provider(provider_str: Option<&str>) -> LLMProvider {
+// `pub(crate)` on this function and the three below (plus
+// `LiveLlmProviderInvocation`) so `summary::commands::ask_about_meeting` /
+// `ask_across_meetings` can resolve the same configured-provider/model
+// invocation this live-insights flow uses, instead of reimplementing
+// provider branching a second time - see their doc comments in
+// `summary/commands.rs` for how they're reused.
+pub(crate) fn resolve_live_llm_provider(provider_str: Option<&str>) -> LLMProvider {
     provider_str
         .and_then(|s| LLMProvider::from_str(s).ok())
         .unwrap_or(LLMProvider::BuiltInAI)
@@ -1553,7 +1559,7 @@ fn resolve_live_llm_provider(provider_str: Option<&str>) -> LLMProvider {
 /// back to the Settings-configured `config_model`. `None` means neither was
 /// available - the caller must treat that as an error rather than passing an
 /// empty model name through to the provider.
-fn resolve_effective_model_name(
+pub(crate) fn resolve_effective_model_name(
     model_name_override: Option<&str>,
     config_model: Option<&str>,
 ) -> Option<String> {
@@ -1644,24 +1650,25 @@ fn resolve_live_llm_api_key(
 /// (endpoint, credentials, CustomOpenAI generation params) that
 /// `llm_client::generate_summary` needs.
 #[derive(Debug, PartialEq)]
-struct LiveLlmProviderInvocation {
-    provider: LLMProvider,
-    model_name: String,
-    api_key: String,
-    ollama_endpoint: Option<String>,
-    custom_openai_endpoint: Option<String>,
-    custom_openai_max_tokens: Option<u32>,
-    custom_openai_temperature: Option<f32>,
-    custom_openai_top_p: Option<f32>,
+pub(crate) struct LiveLlmProviderInvocation {
+    pub(crate) provider: LLMProvider,
+    pub(crate) model_name: String,
+    pub(crate) api_key: String,
+    pub(crate) ollama_endpoint: Option<String>,
+    pub(crate) custom_openai_endpoint: Option<String>,
+    pub(crate) custom_openai_max_tokens: Option<u32>,
+    pub(crate) custom_openai_temperature: Option<f32>,
+    pub(crate) custom_openai_top_p: Option<f32>,
 }
 
 /// Resolves how to call a configured non-builtin summary `provider`, mirroring
 /// the same provider-driven branching `SummaryService::process_transcript_background`
 /// (`summary/service.rs`) already uses for the post-meeting summary pipeline:
-/// `Ollama` needs no API key (just an optional custom endpoint), `CustomOpenAI`
-/// is configured entirely separately (its own endpoint/key/generation params,
-/// stored as JSON - see `custom_openai_config`), and every other provider
-/// requires a non-empty API key from `api_key`.
+/// `Ollama` and `LmStudio` need no API key (just an optional custom endpoint,
+/// since both are local servers), `CustomOpenAI` is configured entirely
+/// separately (its own endpoint/key/generation params, stored as JSON - see
+/// `custom_openai_config`), and every other provider requires a non-empty API
+/// key from `api_key`.
 ///
 /// A pure function deliberately: `custom_openai_config` must be fetched by the
 /// caller beforehand (it's async/DB-backed), so this branching logic itself
@@ -1669,7 +1676,7 @@ struct LiveLlmProviderInvocation {
 /// with `provider == LLMProvider::BuiltInAI` - that path is handled entirely
 /// separately by `generate_bounded_live_llm_text` to keep the existing builtin
 /// behavior (cached model resolution + readiness check) untouched.
-fn resolve_provider_invocation(
+pub(crate) fn resolve_provider_invocation(
     provider: &LLMProvider,
     model_name: &str,
     api_key: Option<&str>,
@@ -1681,7 +1688,7 @@ fn resolve_provider_invocation(
             "resolve_provider_invocation must not be called for LLMProvider::BuiltInAI - \
              generate_bounded_live_llm_text handles that path separately"
         ),
-        LLMProvider::Ollama => Ok(LiveLlmProviderInvocation {
+        LLMProvider::Ollama | LLMProvider::LmStudio => Ok(LiveLlmProviderInvocation {
             provider: provider.clone(),
             model_name: model_name.to_string(),
             api_key: String::new(),
@@ -2978,6 +2985,28 @@ mod live_insights_window_tests {
         assert_eq!(
             invocation.ollama_endpoint.as_deref(),
             Some("http://custom-host:11434")
+        );
+    }
+
+    /// LM Studio's local server doesn't require an API key either (mirrors
+    /// `llm_client::generate_summary`, which sends no Authorization header for
+    /// `LLMProvider::LmStudio` - see the `provider != &LLMProvider::LmStudio`
+    /// check in that function's header-building logic).
+    #[test]
+    fn resolve_provider_invocation_lmstudio_needs_no_api_key() {
+        let invocation = resolve_provider_invocation(
+            &LLMProvider::LmStudio,
+            "local-model",
+            None,
+            Some("http://localhost:1234/v1"),
+            None,
+        )
+        .expect("LM Studio must not require an API key");
+
+        assert_eq!(invocation.api_key, "");
+        assert_eq!(
+            invocation.ollama_endpoint.as_deref(),
+            Some("http://localhost:1234/v1")
         );
     }
 

@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'bun:test';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { LiveActionChips } from '../../src/app/_components/LiveActionChips';
 import type { LiveActionChipState } from '../../src/hooks/useLiveActionChips';
 
@@ -29,6 +29,13 @@ function popoverText(): string {
   const wrapper = document.querySelector('[data-radix-popper-content-wrapper]');
   return (wrapper ?? document.body).textContent?.trim() ?? '';
 }
+
+// Without this, each renderChips() call above leaves its trigger button
+// mounted, so a later test's `screen.getByTitle('Recap')` can match more
+// than one element once other test files run in the same process.
+afterEach(() => {
+  cleanup();
+});
 
 describe('LiveActionChips control cases (mechanism sanity check)', () => {
   test('a genuinely empty ("") resolved result correctly shows the "not enough conversation" message', () => {

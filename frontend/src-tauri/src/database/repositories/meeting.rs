@@ -128,6 +128,61 @@ impl MeetingsRepository {
         Ok(meeting)
     }
 
+    /// Fetches only enough of a meeting's most recent transcript rows (by
+    /// `audio_start_time`, same ordering convention as
+    /// `get_meeting_transcripts_paginated`) to cover `max_chars` Unicode
+    /// characters, joined in chronological order with "\n" - instead of
+    /// `get_meeting`'s full-transcript fetch, which loads every row
+    /// regardless of how much of it a caller will actually use. Used by
+    /// `ask_about_meeting`, which only ever keeps the tail of the transcript
+    /// after truncating to a char budget anyway.
+    ///
+    /// Relies on SQLite's `LENGTH()` counting Unicode characters (not bytes)
+    /// for well-formed UTF-8 TEXT, matching the char-based truncation the
+    /// caller applies on top. May return slightly more than `max_chars`
+    /// characters (by up to one row's length), since the row that crosses
+    /// the budget is still included whole; callers needing an exact bound
+    /// should still apply their own final truncation.
+    pub async fn get_recent_transcript_text(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        max_chars: i64,
+    ) -> Result<String, SqlxError> {
+        if meeting_id.trim().is_empty() {
+            return Err(SqlxError::Protocol(
+                "meeting_id cannot be empty".to_string(),
+            ));
+        }
+        if max_chars <= 0 {
+            return Ok(String::new());
+        }
+
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"
+            SELECT transcript FROM (
+                SELECT transcript, audio_start_time, id,
+                       SUM(LENGTH(transcript)) OVER (
+                           ORDER BY audio_start_time DESC, id DESC
+                       ) AS running_chars
+                FROM transcripts
+                WHERE meeting_id = ?
+            ) AS recent
+            WHERE running_chars - LENGTH(transcript) < ?
+            ORDER BY audio_start_time ASC, id ASC
+            "#,
+        )
+        .bind(meeting_id)
+        .bind(max_chars)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(text,)| text)
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+
     /// Get meeting transcripts with pagination support
     pub async fn get_meeting_transcripts_paginated(
         pool: &SqlitePool,
@@ -271,4 +326,93 @@ async fn delete_meeting_with_transaction(
         .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::repositories::test_support::{insert_meeting, setup_pool};
+
+    async fn insert_transcript(
+        pool: &SqlitePool,
+        id: &str,
+        meeting_id: &str,
+        text: &str,
+        audio_start_time: f64,
+    ) {
+        sqlx::query(
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(meeting_id)
+        .bind(text)
+        .bind("00:00:00")
+        .bind(audio_start_time)
+        .execute(pool)
+        .await
+        .expect("failed to insert transcript");
+    }
+
+    /// Five 10-char rows, oldest ("A") to newest ("E") by `audio_start_time`.
+    /// A `max_chars` budget of 25 covers "E" + "D" + "C" (30 chars, since the
+    /// row that crosses the budget is kept whole) but not "B" - verifying
+    /// both that only the most recent rows are fetched and that they come
+    /// back in chronological (oldest-of-the-kept-first) order.
+    #[tokio::test]
+    async fn get_recent_transcript_text_returns_only_most_recent_rows_within_budget() {
+        let pool = setup_pool().await;
+        insert_meeting(&pool, "m1").await;
+        for (i, label) in ["A", "B", "C", "D", "E"].iter().enumerate() {
+            insert_transcript(&pool, &format!("t{}", i), "m1", &label.repeat(10), i as f64).await;
+        }
+
+        let result = MeetingsRepository::get_recent_transcript_text(&pool, "m1", 25)
+            .await
+            .expect("query failed");
+
+        assert_eq!(result, format!("{}\n{}\n{}", "C".repeat(10), "D".repeat(10), "E".repeat(10)));
+        assert!(!result.contains('B'));
+        assert!(!result.contains('A'));
+    }
+
+    #[tokio::test]
+    async fn get_recent_transcript_text_returns_everything_when_within_budget() {
+        let pool = setup_pool().await;
+        insert_meeting(&pool, "m1").await;
+        for (i, label) in ["A", "B", "C"].iter().enumerate() {
+            insert_transcript(&pool, &format!("t{}", i), "m1", &label.repeat(5), i as f64).await;
+        }
+
+        let result = MeetingsRepository::get_recent_transcript_text(&pool, "m1", 10_000)
+            .await
+            .expect("query failed");
+
+        assert_eq!(result, format!("{}\n{}\n{}", "A".repeat(5), "B".repeat(5), "C".repeat(5)));
+    }
+
+    #[tokio::test]
+    async fn get_recent_transcript_text_zero_budget_returns_empty_string() {
+        let pool = setup_pool().await;
+        insert_meeting(&pool, "m1").await;
+        insert_transcript(&pool, "t0", "m1", "some text", 0.0).await;
+
+        let result = MeetingsRepository::get_recent_transcript_text(&pool, "m1", 0)
+            .await
+            .expect("query failed");
+
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
+    async fn get_recent_transcript_text_no_transcripts_returns_empty_string() {
+        let pool = setup_pool().await;
+        insert_meeting(&pool, "m1").await;
+
+        let result = MeetingsRepository::get_recent_transcript_text(&pool, "m1", 1000)
+            .await
+            .expect("query failed");
+
+        assert_eq!(result, "");
+    }
 }
