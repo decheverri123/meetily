@@ -40,5 +40,5 @@ pnpm run build
 echo "Setting up build environment..."
 
 echo "Building Tauri app..."
-pnpm run tauri:dev
+./dev-gpu.sh
 

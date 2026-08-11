@@ -52,7 +52,7 @@ pnpm run build
 # Set environment variables for the build
 
 echo "Building Tauri app..."
-pnpm run tauri:build
+./build-gpu.sh
 
 # Deploy to Applications folder
 echo "Deploying app to Applications folder..."
