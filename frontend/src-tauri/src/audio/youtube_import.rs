@@ -552,6 +552,8 @@ pub async fn is_youtube_import_in_progress_command() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::common::IMPORT_IN_PROGRESS;
+    use std::sync::Arc;
 
     // -- yt-dlp progress line parsing --
 
@@ -648,5 +650,385 @@ mod tests {
     #[test]
     fn test_is_valid_youtube_url_rejects_bare_youtu_be() {
         assert!(!is_valid_youtube_url("https://youtu.be/"));
+    }
+
+    // -- Adversarial: is_valid_youtube_url edge cases --
+
+    #[test]
+    fn test_is_valid_youtube_url_accepts_empty_video_id() {
+        // BUG: `?v=` with an empty value still satisfies `.any(|(k, _)| k == "v")`
+        // since only the key is checked, not the value. This URL has no actual
+        // video id and yt-dlp will reject it, but validation says it's fine.
+        assert!(
+            is_valid_youtube_url("https://www.youtube.com/watch?v="),
+            "empty v= param should not be treated as a valid video URL, but validation accepted it"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_youtube_url_rejects_userinfo_spoof() {
+        // "https://www.youtube.com@evil.com/..." parses www.youtube.com as
+        // userinfo and evil.com as the actual host. Confirms no bypass.
+        assert!(!is_valid_youtube_url("https://www.youtube.com@evil.com/watch?v=dQw4w9WgXcQ"));
+    }
+
+    #[test]
+    fn test_is_valid_youtube_url_rejects_subdomain_spoof() {
+        // "youtube.com.evil.com" contains "youtube.com" as a substring but is a
+        // different registrable domain entirely.
+        assert!(!is_valid_youtube_url("https://youtube.com.evil.com/watch?v=dQw4w9WgXcQ"));
+    }
+
+    // -- Adversarial: fetch_youtube_video_info against a fake yt-dlp subprocess --
+    //
+    // These spawn a real child process (a throwaway bash script written to a
+    // tempdir and never left in the tree) to exercise the actual process
+    // boundary: argv passing, non-zero exit + stderr surfacing, and JSON
+    // parsing of yt-dlp's stdout.
+
+    fn write_fake_ytdlp(dir: &std::path::Path, script: &str) -> PathBuf {
+        let path = dir.join("yt-dlp");
+        std::fs::write(&path, script).unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        path
+    }
+
+    #[tokio::test]
+    async fn test_fetch_video_info_surfaces_stderr_on_nonzero_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "#!/usr/bin/env bash\necho 'ERROR: Video unavailable. This video is private.' >&2\nexit 1\n";
+        let fake = write_fake_ytdlp(dir.path(), script);
+
+        let result = fetch_youtube_video_info(&fake, "https://www.youtube.com/watch?v=dQw4w9WgXcQ").await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("private"),
+            "expected the real yt-dlp stderr reason to surface to the user, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_video_info_nonzero_exit_empty_stderr_still_useful() {
+        // Simulates yt-dlp crashing/killed with no stderr output at all
+        // (e.g. OOM-killed, SIGKILL from the OS on disk-full paging).
+        let dir = tempfile::tempdir().unwrap();
+        let script = "#!/usr/bin/env bash\nexit 137\n";
+        let fake = write_fake_ytdlp(dir.path(), script);
+
+        let result = fetch_youtube_video_info(&fake, "https://www.youtube.com/watch?v=dQw4w9WgXcQ").await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(!msg.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_video_info_malformed_json_does_not_panic() {
+        // Simulates an ancient/incompatible yt-dlp whose --dump-json output
+        // isn't actually JSON (e.g. a deprecation banner printed to stdout).
+        let dir = tempfile::tempdir().unwrap();
+        let script = "#!/usr/bin/env bash\necho 'yt-dlp: command not fully supported, upgrade recommended'\nexit 0\n";
+        let fake = write_fake_ytdlp(dir.path(), script);
+
+        let result = fetch_youtube_video_info(&fake, "https://www.youtube.com/watch?v=dQw4w9WgXcQ").await;
+        assert!(result.is_err(), "malformed JSON should error, not panic");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_video_info_missing_fields_degrades_gracefully() {
+        // Simulates a yt-dlp version whose JSON schema dropped/renamed fields.
+        let dir = tempfile::tempdir().unwrap();
+        let script = "#!/usr/bin/env bash\necho '{}'\nexit 0\n";
+        let fake = write_fake_ytdlp(dir.path(), script);
+
+        let result = fetch_youtube_video_info(&fake, "https://www.youtube.com/watch?v=dQw4w9WgXcQ").await;
+        assert!(result.is_ok(), "missing fields should degrade to defaults, not error: {:?}", result.err());
+        let info = result.unwrap();
+        assert_eq!(info.title, "Untitled YouTube Video");
+        assert_eq!(info.duration_seconds, None);
+        assert_eq!(info.channel, None);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_video_info_negative_duration_does_not_panic() {
+        // Simulates a broken/malicious yt-dlp fork emitting a negative duration.
+        let dir = tempfile::tempdir().unwrap();
+        let script = "#!/usr/bin/env bash\necho '{\"title\":\"x\",\"duration\":-5}'\nexit 0\n";
+        let fake = write_fake_ytdlp(dir.path(), script);
+
+        let result = fetch_youtube_video_info(&fake, "https://www.youtube.com/watch?v=dQw4w9WgXcQ").await;
+        assert!(result.is_ok());
+        // as_u64() on a negative JSON number returns None rather than panicking/wrapping.
+        assert_eq!(result.unwrap().duration_seconds, None);
+    }
+
+    #[tokio::test]
+    async fn test_url_passed_as_single_argv_element_not_shell_interpreted() {
+        // Proves the URL reaches the child process as one argv element (via
+        // std::process::Command::arg), not through a shell, by using a
+        // "URL" containing shell metacharacters and confirming the fake
+        // yt-dlp receives it byte-for-byte with no injected command effects.
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("argv_dump.txt");
+        let script = format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {}\necho '{{}}'\nexit 0\n",
+            out_file.display()
+        );
+        let fake = write_fake_ytdlp(dir.path(), &script);
+
+        // Deliberately not a URL is_valid_youtube_url would accept - this test
+        // calls fetch_youtube_video_info directly (bypassing validation) to
+        // isolate the subprocess-argv boundary itself.
+        let hostile = "https://www.youtube.com/watch?v=x; touch /tmp/pwned; echo $(whoami)`id`|cat";
+
+        let result = fetch_youtube_video_info(&fake, hostile).await;
+        assert!(result.is_ok());
+        assert!(!std::path::Path::new("/tmp/pwned").exists(), "shell metacharacters were executed!");
+
+        let dumped = std::fs::read_to_string(&out_file).unwrap();
+        assert!(
+            dumped.contains(hostile),
+            "expected the fake yt-dlp to receive the hostile string as a literal single arg, got: {}",
+            dumped
+        );
+        let _ = std::fs::remove_file("/tmp/pwned");
+    }
+
+    // -- Adversarial: child-process kill / cancellation --
+
+    /// Serializes tests that mutate the module's shared statics
+    /// (`YOUTUBE_IMPORT_CANCELLED`, `YOUTUBE_IMPORT_CHILD`) and the
+    /// cross-module `IMPORT_IN_PROGRESS` / `YOUTUBE_IMPORT_IN_PROGRESS`
+    /// flags, since `cargo test` runs tests in the same binary concurrently
+    /// by default and these are process-wide globals.
+    static GLOBAL_STATE_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    #[tokio::test]
+    async fn test_cancel_kills_but_leaves_zombie_until_waited() {
+        let _guard = GLOBAL_STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Spawn a long-lived stand-in for yt-dlp mid-download.
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("60").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let child = command.spawn().expect("failed to spawn sleep");
+        let pid = child.id().expect("child should have a pid");
+
+        {
+            let mut guard = YOUTUBE_IMPORT_CHILD.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(child);
+        }
+
+        cancel_youtube_import();
+
+        // `cancel_youtube_import` only calls `start_kill()`, which sends
+        // SIGKILL but does not reap the process - reaping happens later, in
+        // `download_audio`, only once its stdout-reading loop observes EOF
+        // and falls through to `child.wait()`. If a caller ever invokes
+        // `cancel_youtube_import()` without that follow-up `wait()` (e.g. a
+        // future refactor, or cancellation racing after the child handle was
+        // already taken out of `YOUTUBE_IMPORT_CHILD`), the process is killed
+        // but never reaped, i.e. exactly the "zombie" failure mode this test
+        // is checking for.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let is_zombie = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("ps -o state= -p {} 2>/dev/null", pid))
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().starts_with('Z'))
+            .unwrap_or(false);
+        assert!(
+            is_zombie,
+            "expected the killed-but-unwaited child (pid {}) to be a zombie, proving              `cancel_youtube_import` alone does not reap - callers must always follow it              with a `wait()`, exactly as `download_audio` does today",
+            pid
+        );
+
+        // Now perform the reap `download_audio` would have done, and confirm
+        // that resolves the zombie (this is the actual production behavior;
+        // the assertion above only demonstrates that `cancel_youtube_import`
+        // by itself is not sufficient).
+        let mut guard = YOUTUBE_IMPORT_CHILD.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mut child) = guard.take() {
+            let _ = child.wait().await;
+        }
+        drop(guard);
+
+        YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_cancel_immediately_after_guard_acquire_gets_clobbered() {
+        // Reproduces the exact statement order in `start_youtube_import_command`'s
+        // spawned task:
+        //     let guard = YoutubeImportGuard::acquire()?;   // sets IN_PROGRESS = true
+        //     YOUTUBE_IMPORT_CANCELLED.store(false, ...);   // resets cancel flag
+        //
+        // If `cancel_youtube_import_command` races in between those two lines
+        // (which it legitimately can: `is_youtube_import_in_progress()` already
+        // reports true once the guard is acquired, so a fast user double-click
+        // on Cancel right after Start is a real, reachable window - not just a
+        // theoretical thread interleaving), the cancellation the user asked for
+        // is silently thrown away by the subsequent reset.
+        let _guard_lock = GLOBAL_STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Ensure clean starting state.
+        release_batch_import(&YOUTUBE_IMPORT_IN_PROGRESS);
+        YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+
+        // 1. Background task acquires the guard (flips IN_PROGRESS -> true).
+        let guard = YoutubeImportGuard::acquire().expect("should acquire cleanly");
+        assert!(is_youtube_import_in_progress());
+
+        // 2. A racing `cancel_youtube_import_command` call lands here, in the
+        //    window between guard-acquire and the cancel-flag reset below.
+        //    `cancel_youtube_import_command` only guards on
+        //    `is_youtube_import_in_progress()`, which is already true, so this
+        //    call succeeds and sets the flag exactly as production code would.
+        cancel_youtube_import();
+        assert!(YOUTUBE_IMPORT_CANCELLED.load(Ordering::SeqCst), "cancel should have registered");
+
+        // 3. The background task continues past guard-acquire and resets the
+        //    cancellation flag, per the real code path in
+        //    `start_youtube_import_command`.
+        YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+
+        // BUG: the user's cancel request from step 2 is gone. The import will
+        // now run to completion even though the user clicked Cancel.
+        assert!(
+            !YOUTUBE_IMPORT_CANCELLED.load(Ordering::SeqCst),
+            "demonstrates the clobber: this is the bad state, not the desired one"
+        );
+
+        drop(guard);
+        release_batch_import(&YOUTUBE_IMPORT_IN_PROGRESS);
+    }
+
+    // -- Adversarial: guard mutual-exclusion under real concurrency --
+
+    #[test]
+    fn test_concurrent_start_only_one_side_wins_no_toctou() {
+        // Fires many concurrent local-file-vs-YouTube acquire attempts at
+        // once and confirms `try_acquire_batch_import`'s shared mutex really
+        // does serialize the two flags (no TOCTOU gap where both fast-path
+        // checks pass before either flag is set).
+        let _guard_lock = GLOBAL_STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        release_batch_import(&IMPORT_IN_PROGRESS);
+        release_batch_import(&YOUTUBE_IMPORT_IN_PROGRESS);
+
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Barrier;
+        let barrier = Arc::new(Barrier::new(20));
+        let successes = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for i in 0..20 {
+            let barrier = barrier.clone();
+            let successes = successes.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let flag: &'static AtomicBool = if i % 2 == 0 {
+                    &IMPORT_IN_PROGRESS
+                } else {
+                    &YOUTUBE_IMPORT_IN_PROGRESS
+                };
+                if try_acquire_batch_import(flag).is_ok() {
+                    successes.fetch_add(1, Ordering::SeqCst);
+                    // Hold it briefly to widen any race window.
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    release_batch_import(flag);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // `try_acquire_batch_import` is a non-blocking try-acquire (it
+        // returns Err immediately if either flag is already set, rather than
+        // waiting its turn), so of 20 concurrent attempts exactly one should
+        // win the initial race; the other 19 should be correctly rejected
+        // rather than incorrectly also succeeding (which is what the
+        // pre-fix, per-flag `compare_exchange` had a TOCTOU gap for: two
+        // threads targeting *different* flags could both pass a stale
+        // "neither flag is set" check before either flag was actually
+        // written). Held up: no double-acquire observed here.
+        assert_eq!(successes.load(Ordering::SeqCst), 1);
+        assert!(!IMPORT_IN_PROGRESS.load(Ordering::SeqCst));
+        assert!(!YOUTUBE_IMPORT_IN_PROGRESS.load(Ordering::SeqCst));
+    }
+
+    // -- Adversarial: progress regex on real yt-dlp output variety --
+
+    #[test]
+    fn test_parse_progress_fragment_based_lines_no_panic_no_match() {
+        // Fragment-based (HLS/DASH) downloads print differently shaped lines;
+        // confirm none of them are misparsed or panic.
+        let lines = [
+            "[download] Downloading fragment 5 of 20",
+            "[hlsnative] Total fragments: 20",
+            "[download] Downloading segment 1",
+            "[Merger] Merging formats into \"audio.wav\"",
+            "[ExtractAudio] Destination: audio.wav",
+        ];
+        for line in lines {
+            assert_eq!(parse_ytdlp_progress_percentage(line), None, "line: {}", line);
+        }
+    }
+
+    // -- Adversarial: what the shared pipeline does with a bad/empty download --
+
+    #[test]
+    fn test_decode_zero_byte_wav_errors_gracefully_not_panic() {
+        // Simulates yt-dlp/ffmpeg producing a truncated/empty "audio.wav"
+        // (e.g. disk-full mid-write, or a killed ffmpeg leaving a 0-byte
+        // file) that still passes `download_audio`'s `audio_path.exists()`
+        // check, since that check only verifies existence, not that the
+        // file is non-empty or a valid WAV.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio.wav");
+        std::fs::write(&path, b"").unwrap();
+
+        let result = std::panic::catch_unwind(|| {
+            crate::audio::decoder::decode_audio_file(&path)
+        });
+
+        assert!(result.is_ok(), "decoding a 0-byte WAV panicked instead of returning an error");
+        assert!(result.unwrap().is_err(), "decoding a 0-byte WAV should fail gracefully with Err");
+    }
+
+    #[test]
+    fn test_decode_garbage_wav_errors_gracefully_not_panic() {
+        // A file with a plausible-looking name but content that isn't audio
+        // at all (e.g. yt-dlp emitting an HTML error page as "audio.wav"
+        // because ffmpeg-location resolution went wrong).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio.wav");
+        std::fs::write(&path, b"<html><body>404 Not Found</body></html>").unwrap();
+
+        let result = std::panic::catch_unwind(|| {
+            crate::audio::decoder::decode_audio_file(&path)
+        });
+
+        assert!(result.is_ok(), "decoding a garbage WAV panicked instead of returning an error");
+        assert!(result.unwrap().is_err(), "decoding a garbage WAV should fail gracefully with Err");
+    }
+
+    #[test]
+    fn test_parse_progress_comma_decimal_locale_fails_safe() {
+        // Held up: the `\[download\]\s+` prefix anchors the match to right
+        // after "[download]", so a comma-decimal line ("42,3%") fails to
+        // match at all (None) instead of misparsing to a wrong percentage
+        // (e.g. "3%") - there's no second attempt point in the string for
+        // the regex engine to retry from.
+        assert_eq!(
+            parse_ytdlp_progress_percentage("[download]  42,3% of ~10.00MiB at 1.20MiB/s"),
+            None
+        );
     }
 }
