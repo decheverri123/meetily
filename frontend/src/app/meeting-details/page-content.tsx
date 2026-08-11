@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Summary, SummaryResponse } from '@/types';
+import { Summary, SummaryDataResponse, SummaryResponse } from '@/types';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
@@ -153,6 +153,22 @@ export default function PageContent({
   useEffect(() => {
     Analytics.trackPageView('meeting_details');
   }, []);
+
+  // Reflect a previously-generated summary's resolved template on load - the
+  // generate/regenerate paths already do this via useSummaryGeneration's
+  // onTemplateResolved calls, but a plain page load/reload only gets
+  // summaryData through this prop, so it needs its own call site. `summaryData`
+  // itself may be a fresh object each render (see page.tsx), so the effect is
+  // keyed off the resolved-template fields rather than object identity.
+  useEffect(() => {
+    templates.applyResolvedTemplate(summaryData as SummaryDataResponse | null);
+  }, [
+    summaryData?.resolved_template_id,
+    summaryData?.resolved_template_name,
+    summaryData?.is_generated_template,
+    meeting.id,
+    templates.applyResolvedTemplate,
+  ]);
 
   // Auto-generate summary when flag is set
   useEffect(() => {

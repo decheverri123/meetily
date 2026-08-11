@@ -551,8 +551,6 @@ impl SummaryService {
         let template = template_choice.template;
         let resolved_template_id = template_choice.template_id;
         let is_generated_template = template_choice.is_generated;
-        let resolved_template_name = template.name.clone();
-        let generated_template_for_json = is_generated_template.then(|| template.clone());
         let template_fingerprint = template_cache_fingerprint(&template);
 
         let cache_source = build_summary_cache_source(
@@ -652,9 +650,9 @@ impl SummaryService {
                     cache_source,
                     summary_language.as_deref(),
                     resolved_template_id.as_deref(),
-                    &resolved_template_name,
+                    &template.name,
                     is_generated_template,
-                    generated_template_for_json.as_ref(),
+                    is_generated_template.then_some(&template),
                 );
 
                 // Update database with completed status
