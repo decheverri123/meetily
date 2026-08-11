@@ -12,8 +12,17 @@ const METADATA_FILE: &str = "metadata.json";
 const METADATA_TEMP_FILE_PREFIX: &str = ".metadata.json.";
 static METADATA_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+const DEFAULT_TEMPLATE_FIELD: &str = "default_template";
+
 pub(crate) fn read_summary_language_from_metadata(folder: &Path) -> Result<Option<String>> {
     read_language_field_from_metadata(folder, SUMMARY_LANGUAGE_FIELD)
+}
+
+/// Reads the `default_template` field written into metadata.json by importers
+/// (e.g. YouTube import writes `"youtube_summary"`) so the summary generator
+/// can preselect the right template for meetings with a non-standard source.
+pub(crate) fn read_default_template_from_metadata(folder: &Path) -> Result<Option<String>> {
+    read_string_field_from_metadata(folder, DEFAULT_TEMPLATE_FIELD)
 }
 
 pub(crate) fn read_detected_summary_language_from_metadata(
@@ -37,6 +46,14 @@ pub(crate) fn write_detected_summary_language_to_metadata(
 }
 
 fn read_language_field_from_metadata(folder: &Path, field: &str) -> Result<Option<String>> {
+    match read_string_field_from_metadata(folder, field)? {
+        Some(code) => Ok(Some(normalise_supported_summary_language(&code)?)),
+        None => Ok(None),
+    }
+}
+
+/// Reads a plain (non-language) trimmed string field from metadata.json.
+fn read_string_field_from_metadata(folder: &Path, field: &str) -> Result<Option<String>> {
     let metadata_path = metadata_path(folder);
     if !metadata_path.exists() {
         return Ok(None);
@@ -46,14 +63,15 @@ fn read_language_field_from_metadata(folder: &Path, field: &str) -> Result<Optio
         .with_context(|| format!("Failed to read {}", metadata_path.display()))?;
     let value = parse_metadata_json(&raw)?;
 
-    let Some(language) = value.get(field) else {
+    let Some(field_value) = value.get(field) else {
         return Ok(None);
     };
 
-    match language.as_str().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(code) => Ok(Some(normalise_supported_summary_language(code)?)),
-        None => Ok(None),
-    }
+    Ok(field_value
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string))
 }
 
 fn write_language_field_to_metadata(
@@ -140,6 +158,41 @@ fn normalise_supported_summary_language(raw: &str) -> Result<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn default_template_missing_field_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("metadata.json"), "{}").unwrap();
+
+        assert_eq!(read_default_template_from_metadata(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn default_template_missing_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(read_default_template_from_metadata(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn default_template_reads_stored_value() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            serde_json::to_string_pretty(&json!({
+                "version": "1.0",
+                "meeting_id": "meeting-123",
+                "default_template": "youtube_summary"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_default_template_from_metadata(dir.path()).unwrap(),
+            Some("youtube_summary".to_string())
+        );
+    }
 
     #[test]
     fn summary_language_missing_field_returns_none() {

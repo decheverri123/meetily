@@ -673,6 +673,7 @@ pub fn run() {
             summary::commands::api_save_meeting_summary_language,
             summary::commands::api_get_meeting_detected_summary_language,
             summary::commands::api_save_meeting_detected_summary_language,
+            summary::commands::api_get_meeting_default_template,
             summary::commands::api_detect_transcript_summary_language,
             summary::commands::api_cancel_summary,
             // Free-text meeting Q&A ("ask about this meeting" / "ask across meetings")
@@ -762,6 +763,11 @@ pub fn run() {
             audio::import::start_import_audio_command,
             audio::import::cancel_import_command,
             audio::import::is_import_in_progress_command,
+            // YouTube import commands
+            audio::youtube_import::validate_youtube_url_command,
+            audio::youtube_import::start_youtube_import_command,
+            audio::youtube_import::cancel_youtube_import_command,
+            audio::youtube_import::is_youtube_import_in_progress_command,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
