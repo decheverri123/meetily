@@ -169,9 +169,15 @@ export default function PageContent({
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: 'easeOut' }}
-      className="flex flex-col h-screen bg-gray-50"
+      className="relative flex flex-col h-screen bg-background text-foreground overflow-hidden"
     >
-      <div className="flex flex-1 overflow-hidden">
+      {/* Ambient background glow - purely decorative, sits behind all content */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="animate-drift absolute -top-1/4 left-1/3 h-[60vh] w-[60vh] rounded-full bg-primary/10 blur-[120px]" />
+        <div className="animate-drift absolute bottom-0 right-0 h-[50vh] w-[50vh] rounded-full bg-accent-violet/10 blur-[120px]" style={{ animationDelay: '6s' }} />
+      </div>
+
+      <div className="relative z-10 flex flex-1 overflow-hidden gap-[18px] p-4">
         <TranscriptPanel
           transcripts={meetingData.transcripts}
           customPrompt={customPrompt}
@@ -229,7 +235,9 @@ export default function PageContent({
           onOpenModelSettings={handleRegisterModalOpen}
         />
       </div>
-      <AskMeetingPanel meetingId={meeting.id} />
+      <div className="relative z-10">
+        <AskMeetingPanel meetingId={meeting.id} />
+      </div>
     </motion.div>
   );
 }

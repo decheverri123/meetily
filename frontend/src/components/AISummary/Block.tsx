@@ -219,9 +219,9 @@ export const BlockComponent: React.FC<BlockProps> = ({
   };
 
   return (
-    <div 
+    <div
       className={`group relative min-h-[24px] flex items-start rounded transition-all duration-150 ease-in-out
-        ${isSelected ? 'bg-blue-50 ring-1 ring-blue-200 shadow-sm' : 'hover:bg-gray-50'}`}
+        ${isSelected ? 'bg-primary/10 ring-1 ring-primary/30' : 'hover:bg-secondary/5'}`}
       onMouseDown={onMouseDown}
       onMouseEnter={onMouseEnter}
       onMouseUp={onMouseUp}
@@ -245,8 +245,8 @@ export const BlockComponent: React.FC<BlockProps> = ({
           rows={1}
           className={`
             w-full resize-none overflow-hidden bg-transparent border-none p-0 focus:outline-none focus:ring-0
-            transition-all duration-150 ease-in-out
-            ${block.color === 'gray' ? 'text-gray-500' : ''}
+            transition-all duration-150 ease-in-out text-foreground
+            ${block.color === 'gray' ? 'text-muted-foreground' : ''}
             ${block.type === 'heading1' ? 'text-xl font-bold' : ''}
             ${block.type === 'heading2' ? 'text-lg font-semibold' : ''}
           `}
@@ -254,27 +254,27 @@ export const BlockComponent: React.FC<BlockProps> = ({
         />
 
         {showCommands && (
-          <div 
+          <div
             ref={commandsRef}
-            className="absolute left-0 top-full mt-1 w-64 bg-white rounded-lg shadow-lg border border-gray-200 py-2 z-50
+            className="absolute left-0 top-full mt-1 w-64 glass-panel shadow-lg shadow-black/20 py-2 z-50
                        animate-in fade-in slide-in-from-top-2 duration-150"
           >
             {filteredCommands.map((cmd, index) => (
               <button
                 key={cmd.id}
                 className={`
-                  w-full text-left px-3 py-2 flex items-center space-x-3 hover:bg-gray-50
-                  ${index === selectedCommandIndex ? 'bg-gray-50' : ''}
+                  w-full text-left px-3 py-2 flex items-center space-x-3 hover:bg-secondary/20 text-foreground
+                  ${index === selectedCommandIndex ? 'bg-secondary/20' : ''}
                 `}
                 onClick={() => handleCommandSelect(cmd)}
                 onMouseEnter={() => setSelectedCommandIndex(index)}
               >
-                <span className="flex-shrink-0 w-6 h-6 flex items-center justify-center bg-gray-100 rounded text-gray-600">
+                <span className="flex-shrink-0 w-6 h-6 flex items-center justify-center bg-secondary/10 rounded text-muted-foreground">
                   {cmd.icon}
                 </span>
                 <div className="flex-1">
                   <div className="font-medium">{cmd.label}</div>
-                  <div className="text-sm text-gray-500">{cmd.description}</div>
+                  <div className="text-sm text-muted-foreground">{cmd.description}</div>
                 </div>
               </button>
             ))}

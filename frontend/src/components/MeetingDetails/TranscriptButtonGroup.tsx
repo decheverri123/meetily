@@ -72,7 +72,7 @@ export function TranscriptButtonGroup({
           <Button
             size="sm"
             variant="outline"
-            className="bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 border-blue-200 xl:px-4"
+            className="bg-gradient-to-r from-accent-violet/10 to-primary/10 hover:from-accent-violet/20 hover:to-primary/20 border-accent-violet/20 xl:px-4"
             onClick={() => {
               Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
               setShowRetranscribeDialog(true);

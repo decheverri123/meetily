@@ -32,9 +32,9 @@ export function AskMeetingPanel({ meetingId }: AskMeetingPanelProps) {
   } = useAskAI('ask_about_meeting', buildArgs);
 
   return (
-    <div className="p-3 border-t border-gray-200 space-y-2">
-      <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
-        <Sparkles className="w-4 h-4" />
+    <div className="p-3 space-y-2 glass-panel">
+      <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+        <Sparkles className="w-4 h-4 text-primary" />
         Ask about this meeting
       </div>
       <div className="flex items-center gap-2">
@@ -51,7 +51,7 @@ export function AskMeetingPanel({ meetingId }: AskMeetingPanelProps) {
       </div>
       {error && (
         <p
-          className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-3 py-2"
+          className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-md px-3 py-2"
           aria-live="polite"
         >
           {error}
@@ -59,7 +59,7 @@ export function AskMeetingPanel({ meetingId }: AskMeetingPanelProps) {
       )}
       {answer && (
         <div
-          className="text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded-md px-3 py-2 whitespace-pre-wrap"
+          className="text-sm text-foreground/80 bg-secondary/5 border border-border/10 rounded-md px-3 py-2 whitespace-pre-wrap"
           aria-live="polite"
         >
           {answer}
