@@ -78,26 +78,31 @@ if (command === 'build' && platform === 'darwin') {
   const appPath = possiblePaths.find(p => fs.existsSync(p));
 
   if (appPath) {
-    const appName = path.basename(appPath);
-    const destPath = path.join('/Applications', appName);
-    console.log(`\n🚚 Installing ${appName} to /Applications...`);
+    const userAppsDir = path.join(os.homedir(), 'Applications');
+    if (!fs.existsSync(userAppsDir)) {
+      fs.mkdirSync(userAppsDir, { recursive: true });
+    }
+
+    const destPath = path.join(userAppsDir, appName);
+    console.log(`\n🚚 Installing ${appName} to ${userAppsDir}...`);
     try {
-      // Remove old versions (sudo for safety)
+      // Remove old versions
       try {
-        execSync(`sudo rm -rf "/Applications/${appName}" "/Applications/meetily.app" "/Applications/Meetily.app"`, { stdio: 'inherit' });
+        fs.rmSync(path.join(userAppsDir, appName), { recursive: true, force: true });
+        fs.rmSync(path.join(userAppsDir, 'meetily.app'), { recursive: true, force: true });
+        fs.rmSync(path.join(userAppsDir, 'Meetily.app'), { recursive: true, force: true });
       } catch (_) {
         // Ignore if nothing to remove
       }
-      // Copy with sudo to handle permissions
-      execSync(`sudo cp -R "${appPath}" "/Applications/"`, { stdio: 'inherit' });
+      // Copy without sudo
+      execSync(`cp -R "${appPath}" "${userAppsDir}/"`, { stdio: 'inherit' });
       console.log(`✅ Successfully replaced ${destPath}\n`);
     } catch (copyErr) {
-      console.error(`⚠️ Failed to install ${appName} to /Applications:`, copyErr.message);
-      console.error('Hint: You may need to authenticate with your password.\n');
+      console.error(`⚠️ Failed to install ${appName} to ${userAppsDir}:`, copyErr.message);
       process.exit(1);
     }
   } else {
-    console.warn('\n⚠️ Could not find built meetily.app bundle to install to /Applications');
+    console.warn('\n⚠️ Could not find built meetily.app bundle to install to Applications');
     process.exit(1);
   }
 }

@@ -28,7 +28,7 @@ export function CollapsedPanelRail({
     <div
       aria-hidden={!visible}
       className={cn(
-        'absolute inset-0 z-10 flex flex-col items-center gap-4 py-3 transition-opacity duration-200',
+        'absolute inset-0 z-10 flex flex-col items-center gap-4 py-3 transition-opacity duration-200 motion-reduce:transition-none',
         visible ? 'opacity-100 delay-100' : 'pointer-events-none opacity-0'
       )}
     >

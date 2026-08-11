@@ -91,7 +91,7 @@ export function TranscriptPanel({
   return (
     <div
       className={cn(
-        'hidden md:flex relative shrink-0 flex-col overflow-hidden glass-panel transition-[width] duration-300 ease-out',
+        'hidden md:flex relative shrink-0 flex-col overflow-hidden glass-panel transition-[width] duration-300 ease-out motion-reduce:transition-none',
         collapsed ? 'w-11' : 'w-80 lg:w-[380px]'
       )}
     >
@@ -99,8 +99,10 @@ export function TranscriptPanel({
           slides out of view instead of reflowing down to rail width. */}
       <div
         className={cn(
-          'flex h-full w-80 lg:w-[380px] shrink-0 flex-col transition-opacity duration-200',
-          collapsed && 'pointer-events-none opacity-0'
+          'flex h-full w-80 lg:w-[380px] shrink-0 flex-col transition-opacity duration-200 motion-reduce:transition-none',
+          // Waits for the container to widen before fading back in, so the
+          // panel is never visible clipped to rail width.
+          collapsed ? 'pointer-events-none opacity-0' : 'delay-100'
         )}
       >
       <div className="flex items-center gap-3 p-4 border-b border-border/10">

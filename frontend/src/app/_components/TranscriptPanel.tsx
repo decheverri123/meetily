@@ -62,8 +62,10 @@ export function TranscriptPanel({
       <div
         ref={transcriptContainerRef}
         className={cn(
-          'flex w-full min-w-[420px] flex-col overflow-y-auto border-r border-border/10 transition-opacity duration-200',
-          collapsed && 'pointer-events-none opacity-0'
+          'flex w-full min-w-[420px] flex-col overflow-y-auto border-r border-border/10 transition-opacity duration-200 motion-reduce:transition-none',
+          // Waits for the column to widen before fading back in, so the
+          // transcript is never visible clipped to rail width.
+          collapsed ? 'pointer-events-none opacity-0' : 'delay-100'
         )}
       >
       <div className="glass-panel-header">

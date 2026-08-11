@@ -136,6 +136,21 @@
     --chart-3: 150 76% 75%;
     --chart-4: 0 100% 65%;
     --chart-5: 43 74% 66%;
+
+    /* Aliases for third-party scopes that redefine the shadcn token names
+       themselves (see .bn-shadcn below). Resolved here against :root's values,
+       so they inherit down as literals and stay in sync with the tokens above
+       instead of being hand-copied. */
+    --app-foreground: var(--foreground);
+    --app-card: var(--card);
+    --app-muted-foreground: var(--muted-foreground);
+    --app-secondary-surface: 224 30% 12%;
+    --app-primary: var(--primary);
+    /* Opaque stand-in for our translucent glass hairline (white at ~12% over
+       the app background). BlockNote consumes borders as bare `hsl(var(--border))`
+       with no alpha slot, so a token that is only correct with an opacity
+       suffix renders solid white there. */
+    --app-hairline: 224 20% 20%;
   }
 }
 
@@ -292,4 +307,48 @@
   .bn-container[data-color-scheme='dark'] .bn-editor {
     background-color: transparent !important;
   }
+}
+
+/* DELIBERATELY UNLAYERED. @blocknote/shadcn's stylesheet is imported by the
+   editor component and so lands outside every cascade layer, and unlayered
+   normal declarations beat layered ones no matter their specificity - the
+   same override inside `@layer base` above loses to the vendor sheet before
+   specificity is ever considered. Hence both the top-level placement and the
+   !important on the custom properties. */
+
+/* @blocknote/shadcn does NOT theme its surfaces off --bn-colors-*. It ships a
+   second copy of the shadcn palette scoped to .bn-shadcn (light) /
+   .bn-shadcn.dark (a navy #020817) and paints
+   `.bn-shadcn .bn-editor { background: hsl(var(--background)) }` from it, so
+   the note rendered as a navy card sitting on the glass panel. Repoint that
+   inner palette at our tokens; the redefinitions are scoped to .bn-shadcn and
+   cannot leak back into the app. */
+.bn-shadcn,
+.bn-shadcn.dark {
+  --background: var(--app-card) !important;
+  --foreground: var(--app-foreground) !important;
+  --card: var(--app-card) !important;
+  --card-foreground: var(--app-foreground) !important;
+  --popover: var(--app-card) !important;
+  --popover-foreground: var(--app-foreground) !important;
+  --secondary: var(--app-secondary-surface) !important;
+  --secondary-foreground: var(--app-foreground) !important;
+  --muted: var(--app-secondary-surface) !important;
+  --muted-foreground: var(--app-muted-foreground) !important;
+  --accent: var(--app-secondary-surface) !important;
+  --accent-foreground: var(--app-foreground) !important;
+  --border: var(--app-hairline) !important;
+  --input: var(--app-hairline) !important;
+  --ring: var(--app-primary) !important;
+}
+
+.bn-shadcn .bn-editor {
+  background-color: transparent !important;
+}
+
+/* Table cells are `border: 1px solid #ddd` in the shipped stylesheet - a
+   light-mode hairline that reads as a hard white grid on the dark note. */
+.bn-shadcn .bn-editor [data-content-type='table'] th,
+.bn-shadcn .bn-editor [data-content-type='table'] td {
+  border-color: hsl(var(--app-foreground) / 0.14) !important;
 }

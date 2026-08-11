@@ -269,7 +269,7 @@ export default function Home() {
                 interpolated. Both endpoints are lengths, so they tween. */}
             <div
               className={cn(
-                'flex flex-col overflow-hidden transition-[flex-basis,flex-grow] duration-300 ease-out',
+                'flex flex-col overflow-hidden transition-[flex-basis,flex-grow] duration-300 ease-out motion-reduce:transition-none',
                 transcriptCollapsed
                   ? 'grow-0 basis-[44px] p-4'
                   : showLiveInsights
@@ -299,7 +299,7 @@ export default function Home() {
             {showAskPanel && (
               <div
                 className={cn(
-                  'flex p-4 pb-28 transition-[flex-grow] duration-300 ease-out',
+                  'flex p-4 pb-28 transition-[flex-grow] duration-300 ease-out motion-reduce:transition-none',
                   transcriptCollapsed && !showLiveInsights ? 'flex-1' : 'shrink-0 grow-0'
                 )}
               >
