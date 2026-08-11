@@ -129,9 +129,7 @@ export function AudioBackendSelector({
 
       <div className="space-y-2">
         {backends.map((backend) => {
-          // Disable Core Audio option
-          const isCoreAudio = backend.id === 'screencapturekit';
-          const isDisabled = disabled || isCoreAudio;
+          const isDisabled = disabled;
 
           return (
             <label
@@ -159,11 +157,6 @@ export function AudioBackendSelector({
                   {currentBackend === backend.id && (
                     <span className="text-xs font-medium text-primary bg-primary/15 px-2 py-0.5 rounded">
                       Active
-                    </span>
-                  )}
-                  {isCoreAudio && (
-                    <span className="text-xs font-medium text-muted-foreground bg-secondary/10 px-2 py-0.5 rounded">
-                      Disabled
                     </span>
                   )}
                 </div>

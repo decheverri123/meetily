@@ -78,6 +78,7 @@ if (command === 'build' && platform === 'darwin') {
   const appPath = possiblePaths.find(p => fs.existsSync(p));
 
   if (appPath) {
+    const appName = path.basename(appPath);
     const userAppsDir = path.join(os.homedir(), 'Applications');
     if (!fs.existsSync(userAppsDir)) {
       fs.mkdirSync(userAppsDir, { recursive: true });

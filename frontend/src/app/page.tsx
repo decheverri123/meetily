@@ -51,7 +51,9 @@ export default function Home() {
   // Transcript segments the latest answer cited, and the one whose chip was
   // last clicked. Held here because they are produced by the ask sidebar and
   // consumed by the transcript column, which are siblings.
-  const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
+  // Collapsed by default: the ask sidebar is the primary surface on this
+  // screen now, and the transcript is a reference panel a user opts into.
+  const [transcriptCollapsed, setTranscriptCollapsed] = useState(true);
   const [citedSegmentIds, setCitedSegmentIds] = useState<string[]>([]);
   const [focusSegment, setFocusSegment] = useState<{ id: string } | null>(null);
 
@@ -288,19 +290,42 @@ export default function Home() {
               />
             </div>
 
-            {showLiveInsights && (
-              <div className="flex flex-1 basis-1/2 flex-col overflow-hidden">
+            {/* Same slide-shut technique as the transcript column: the outer
+                clip tweens flex-basis while the inner content holds its
+                expanded min-width and crossfades, so it slides out rather
+                than squashing its contents mid-animation. */}
+            <div
+              className={cn(
+                'flex flex-col overflow-hidden transition-[flex-basis,flex-grow] duration-300 ease-out motion-reduce:transition-none',
+                showLiveInsights ? 'grow basis-1/2' : 'grow-0 basis-0'
+              )}
+            >
+              <div
+                className={cn(
+                  'flex h-full min-w-[420px] flex-col transition-opacity duration-200 motion-reduce:transition-none',
+                  showLiveInsights ? 'opacity-100 delay-100' : 'pointer-events-none opacity-0'
+                )}
+              >
                 <LiveInsightsPanel {...liveInsights} />
               </div>
-            )}
+            </div>
 
             {/* pb-28 clears the floating transport bar, which is fixed at
                 bottom-12 (48px) and ~56px tall. */}
-            {showAskPanel && (
+            <div
+              className={cn(
+                'flex overflow-hidden p-4 pb-28 transition-[flex-basis,flex-grow] duration-300 ease-out motion-reduce:transition-none',
+                showAskPanel
+                  ? transcriptCollapsed && !showLiveInsights
+                    ? 'grow basis-0'
+                    : 'shrink-0 grow-0 basis-[432px]'
+                  : 'grow-0 basis-0 p-0'
+              )}
+            >
               <div
                 className={cn(
-                  'flex p-4 pb-28 transition-[flex-grow] duration-300 ease-out motion-reduce:transition-none',
-                  transcriptCollapsed && !showLiveInsights ? 'flex-1' : 'shrink-0 grow-0'
+                  'flex h-full min-w-[400px] flex-1 transition-opacity duration-200 motion-reduce:transition-none',
+                  showAskPanel ? 'opacity-100 delay-100' : 'pointer-events-none opacity-0'
                 )}
               >
                 <LiveAskPanel
@@ -310,7 +335,7 @@ export default function Home() {
                   onClose={() => setShowAskPanel(false)}
                 />
               </div>
-            )}
+            </div>
           </>
         )}
 

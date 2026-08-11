@@ -10,9 +10,9 @@ import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { AskMeetingPanel } from '@/components/MeetingDetails/AskMeetingPanel';
 import { ModelConfig } from '@/components/ModelSettingsModal';
-import { Button } from '@/components/ui/button';
-import { MessageSquareText } from 'lucide-react';
 import { useAskPanelShortcut } from '@/hooks/useAskPanelShortcut';
+import { CollapsedPanelRail } from '@/components/shared/CollapsedPanelRail';
+import { cn } from '@/lib/utils';
 
 // Custom hooks
 import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
@@ -63,8 +63,9 @@ export default function PageContent({
   const [summaryResponse] = useState<SummaryResponse | null>(null);
   // Ask sidebar: docked beside the note, dismissible, toggled with Cmd/Ctrl+J.
   const [showAskPanel, setShowAskPanel] = useState(true);
-  // Produced by the ask sidebar, consumed by the transcript column beside it.
-  const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
+  // Collapsed by default: the ask sidebar is the primary surface on this
+  // screen now, and the transcript is a reference panel a user opts into.
+  const [transcriptCollapsed, setTranscriptCollapsed] = useState(true);
   const [citedSegmentIds, setCitedSegmentIds] = useState<string[]>([]);
   const [focusSegment, setFocusSegment] = useState<{ id: string } | null>(null);
 
@@ -249,26 +250,38 @@ export default function PageContent({
           isModelConfigLoading={false}
           onOpenModelSettings={handleRegisterModalOpen}
         />
-        {showAskPanel ? (
-          <AskMeetingPanel
-            meetingId={meeting.id}
-            segments={segments}
-            onCitedSegmentsChange={setCitedSegmentIds}
-            onFocusSegment={id => setFocusSegment({ id })}
-            onClose={() => setShowAskPanel(false)}
-          />
-        ) : (
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="glass-pill h-9 w-9 shrink-0 rounded-full"
-            onClick={() => setShowAskPanel(true)}
-            title="Ask this meeting (⌘J)"
+        {/* Mirrors TranscriptPanel's own collapse animation: stays mounted at
+            its full width while the outer clip narrows to a rail, so the
+            panel slides shut rather than reflowing, and its state (open
+            thread, scroll position) survives the round trip. */}
+        <div
+          className={cn(
+            'relative shrink-0 overflow-hidden transition-[width] duration-300 ease-out motion-reduce:transition-none',
+            showAskPanel ? 'w-[400px]' : 'w-11'
+          )}
+        >
+          <div
+            className={cn(
+              'flex h-full w-[400px] shrink-0 transition-opacity duration-200 motion-reduce:transition-none',
+              showAskPanel ? 'opacity-100 delay-100' : 'pointer-events-none opacity-0'
+            )}
           >
-            <MessageSquareText className="h-4 w-4" />
-          </Button>
-        )}
+            <AskMeetingPanel
+              meetingId={meeting.id}
+              segments={segments}
+              onCitedSegmentsChange={setCitedSegmentIds}
+              onFocusSegment={id => setFocusSegment({ id })}
+              onClose={() => setShowAskPanel(false)}
+            />
+          </div>
+
+          <CollapsedPanelRail
+            label="Ask"
+            visible={!showAskPanel}
+            onExpand={() => setShowAskPanel(true)}
+            expandTitle="Ask this meeting (⌘J)"
+          />
+        </div>
       </div>
     </motion.div>
   );
