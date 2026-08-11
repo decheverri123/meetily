@@ -13,15 +13,25 @@ use super::encode::encode_single_audio; // Correct path to encode module
 
 /// Sanitize a filename to be safe for filesystem use
 pub fn sanitize_filename(name: &str) -> String {
-    name.chars()
+    let sanitized: String = name.chars()
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
             c if c.is_control() => '_',
             c => c,
         })
-        .collect::<String>()
-        .trim()
-        .to_string()
+        .collect();
+
+    let trimmed = sanitized.trim();
+    if trimmed.len() > 128 {
+        // Truncate to 128 bytes, ensuring we don't split a UTF-8 character
+        let mut end = 128;
+        while end > 0 && !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        trimmed[..end].to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Create a meeting folder with timestamp and return the path
@@ -736,4 +746,57 @@ pub fn write_transcript_json_to_file(
     std::fs::write(&file_path, json_string)?;
 
     Ok(file_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod breaker_round2_tests {
+    use super::*;
+
+    // -- Adversarial: create_meeting_folder with a YouTube-video-shaped title --
+    //
+    // YouTube titles can legally contain many multi-byte Unicode characters
+    // (emoji, CJK, etc). `sanitize_filename` only *replaces* filesystem-hostile
+    // characters 1:1 - it never truncates by byte length. On common filesystems
+    // (APFS, ext4, most Windows setups too) a single path *component* is capped
+    // at 255 bytes. A title using multi-byte characters can blow past that cap
+    // well within YouTube's title character-count limits, since the limit is in
+    // UTF-16 code units / characters, not UTF-8 bytes.
+    #[test]
+    fn test_create_meeting_folder_long_multibyte_title_does_not_silently_fail() {
+        let base = tempfile::tempdir().unwrap();
+        let base_path = base.path().to_path_buf();
+
+        // 100 four-byte emoji = 400 bytes, well over the 255-byte component cap,
+        // and well under any character-count title limit YouTube enforces.
+        let title: String = std::iter::repeat('\u{1F600}').take(100).collect();
+
+        let result = create_meeting_folder(&base_path, &title, false);
+        assert!(
+            result.is_ok(),
+            "expected create_meeting_folder to handle an oversized multi-byte \
+             title gracefully (e.g. by truncating the sanitized name), but got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_sanitize_filename_does_not_truncate_long_names() {
+        // Documents that sanitize_filename has no length cap at all - it is a
+        // pure character-replacement function. Anything relying on it to
+        // produce a filesystem-safe *component* (not just character-safe) is
+        // relying on a guarantee it doesn't provide.
+        let title: String = std::iter::repeat('\u{1F600}').take(100).collect();
+        let sanitized = sanitize_filename(&title);
+        assert_eq!(
+            sanitized.chars().count(),
+            100,
+            "sanitize_filename left all 100 characters in place"
+        );
+        assert!(
+            sanitized.len() > 255,
+            "sanitized name is {} bytes, over the common 255-byte filesystem \
+             component limit, yet sanitize_filename applied no truncation",
+            sanitized.len()
+        );
+    }
 }

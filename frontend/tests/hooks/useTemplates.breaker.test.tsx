@@ -20,7 +20,7 @@ describe('useTemplates - YouTube import default_template wiring', () => {
     mock.restore();
   });
 
-('a stored default_template not present in availableTemplates is NOT applied, leaving the existing selection intact', async () => {
+  test('a stored default_template not present in availableTemplates is NOT applied, leaving the existing selection intact', async () => {
     invokeImpl = async (cmd: string) => {
       if (cmd === 'api_list_templates') {
         // The template list a real user actually has - it does NOT contain
@@ -41,14 +41,14 @@ describe('useTemplates - YouTube import default_template wiring', () => {
     const { result } = renderHook(() => useTemplates('meeting-123'));
 
     await waitFor(() => {
-      expect(result.current.selectedTemplate).toBe('youtube_summary');
+      expect(result.current.availableTemplates.length).toBeGreaterThan(0);
     });
 
-    // BUG: selectedTemplate now references a template id that isn't in
-    // availableTemplates at all - a dropdown driven off availableTemplates
-    // has nothing selected/matching, and summary generation for this
-    // selectedTemplate id will fail or silently fall back server-side,
-    // with no user-visible indication of why.
+    // The stored default_template ("youtube_summary") isn't in
+    // availableTemplates, so it must not be applied - selectedTemplate
+    // stays on the hook's existing default instead of pointing at a
+    // template id the dropdown can't match.
+    expect(result.current.selectedTemplate).toBe('standard_meeting');
     const exists = result.current.availableTemplates.some(t => t.id === result.current.selectedTemplate);
     expect(exists).toBe(true);
   });
