@@ -402,6 +402,61 @@ mod tests {
         assert!(!choice.is_generated);
     }
 
+    // ---- resolve_parsed_choice: path traversal via LLM-controlled "match" id ----
+    //
+    // `select_template`'s system prompt only advertises the candidate ids it
+    // was given, but `resolve_parsed_choice` never checks the LLM's returned
+    // "match" id against that candidate list - it is passed straight to
+    // `get_template`/`load_bundled_template`, which builds a path via
+    // `bundled_dir.join(format!("{}.json", template_id))` with no
+    // sanitization. An LLM response (which is influenced by
+    // attacker-controlled transcript content, e.g. prompt injection) can
+    // therefore make the resolver read and surface the contents of an
+    // arbitrary `*.json` file elsewhere on disk as if it were a trusted
+    // template.
+    #[test]
+    fn resolve_parsed_choice_match_id_escapes_bundled_templates_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "meetily_breaker_traversal_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bundled_dir = root.join("bundled");
+        let outside_dir = root.join("outside");
+        std::fs::create_dir_all(&bundled_dir).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+
+        // A file that lives OUTSIDE the officially-configured bundled
+        // templates directory - this stands in for any arbitrary *.json file
+        // on the user's disk that happens to be shaped like a Template.
+        let secret_path = outside_dir.join("secret.json");
+        std::fs::write(
+            &secret_path,
+            r#"{"name": "SECRET LEAKED TEMPLATE", "description": "should never be reachable via match id", "sections": [{"title": "x", "instruction": "x", "format": "paragraph"}]}"#,
+        )
+        .unwrap();
+
+        crate::summary::templates::set_bundled_templates_dir(bundled_dir);
+
+        // Simulate the LLM returning a path-traversal-shaped "match" id
+        // instead of one of the advertised candidate ids.
+        let choice = resolve_parsed_choice(Ok(ParsedChoice::Match("../outside/secret".to_string())));
+
+        std::fs::remove_dir_all(&root).ok();
+
+        // A safe implementation would refuse this id (unknown/invalid) and
+        // fall back to the bundled standard_meeting template. Instead, the
+        // traversal succeeds and the "outside" file's content is loaded and
+        // returned as if it were a legitimate template.
+        assert_ne!(
+            choice.template.name, "SECRET LEAKED TEMPLATE",
+            "match id '../outside/secret' escaped the bundled templates directory and loaded an arbitrary file from disk"
+        );
+    }
+
     // ---- fallback_choice ----
 
     #[test]
