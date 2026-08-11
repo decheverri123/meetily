@@ -1,11 +1,13 @@
 'use client';
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { AskSidebar } from '@/components/shared/AskSidebar';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useTranscriptSegments } from '@/hooks/useTranscriptSegments';
 import { buildTimestampedTranscript } from '@/lib/askCitations';
 import { useSuggestedQuestions } from '@/hooks/useSuggestedQuestions';
+import { useConfig } from '@/contexts/ConfigContext';
+import { modelConfigLabel } from './LiveActionChipModelPicker';
 
 /**
  * Ask sidebar for the meeting currently being recorded. Calls
@@ -14,17 +16,10 @@ import { useSuggestedQuestions } from '@/hooks/useSuggestedQuestions';
  * along with the question instead of being looked up backend-side by id.
  */
 
-// Shown until the meeting has enough transcript to suggest something better.
-const FALLBACK_QUESTIONS = [
-  'What has been decided so far?',
-  'Any risks raised?',
-  'tl;dr',
-] as const;
-
 /**
- * Enough transcript for a suggestion to beat the generic fallbacks. Well under
- * the backend's own "no transcript yet" floor is useless here - two words in,
- * the model can only echo the fallbacks back.
+ * Enough transcript for a suggestion to actually be worth generating. Well
+ * under the backend's own "no transcript yet" floor is useless here - two
+ * words in, the model has nothing to draw a real question from.
  */
 const MIN_CHARS_FOR_SUGGESTIONS = 400;
 
@@ -41,6 +36,10 @@ interface LiveAskPanelProps {
   onCitedSegmentsChange?: (segmentIds: string[]) => void;
   onFocusSegment?: (segmentId: string) => void;
   onClose?: () => void;
+  /** Fires each time an answer finishes, for a caller showing this collapsed to flag it. */
+  onAnswered?: () => void;
+  /** Fires once, the first time real (non-empty) suggestions land. */
+  onSuggestionsReady?: () => void;
 }
 
 export function LiveAskPanel({
@@ -48,9 +47,12 @@ export function LiveAskPanel({
   onCitedSegmentsChange,
   onFocusSegment,
   onClose,
+  onAnswered,
+  onSuggestionsReady,
 }: LiveAskPanelProps) {
   const { transcripts } = useTranscripts();
   const segments = useTranscriptSegments();
+  const { modelConfig } = useConfig();
 
   // The transcript grows for the whole meeting and this component re-renders
   // on every keystroke, so the join is memoized against the segments alone.
@@ -63,7 +65,6 @@ export function LiveAskPanel({
     command: 'suggest_live_transcript_questions',
     args: { transcript: transcriptText },
     scope: 'live',
-    fallback: FALLBACK_QUESTIONS,
     enabled: transcriptText.length >= MIN_CHARS_FOR_SUGGESTIONS,
     refreshKey: Math.floor(transcriptText.length / SUGGESTION_REFRESH_CHARS),
   });
@@ -73,6 +74,14 @@ export function LiveAskPanel({
     [transcriptText]
   );
 
+  const hadSuggestionsRef = useRef(false);
+  useEffect(() => {
+    if (!hadSuggestionsRef.current && suggestions.length > 0) {
+      onSuggestionsReady?.();
+    }
+    hadSuggestionsRef.current = suggestions.length > 0;
+  }, [suggestions.length, onSuggestionsReady]);
+
   return (
     <AskSidebar
       command="ask_about_live_transcript"
@@ -80,7 +89,7 @@ export function LiveAskPanel({
       segments={segments}
       placeholder="Ask about the meeting so far..."
       suggestions={suggestions}
-      scopeNote="ANSWERS FROM THIS TRANSCRIPT ONLY"
+      modelLabel={modelConfigLabel(modelConfig)}
       fill={fill}
       // Disabled up front rather than round-tripping only to surface the
       // backend's "no transcript yet" rejection.
@@ -89,6 +98,7 @@ export function LiveAskPanel({
       onCitedSegmentsChange={onCitedSegmentsChange}
       onFocusSegment={onFocusSegment}
       onClose={onClose}
+      onAnswered={onAnswered}
     />
   );
 }

@@ -8,8 +8,6 @@ const { parseSuggestedQuestions, useSuggestedQuestions } = await import(
   '../../src/hooks/useSuggestedQuestions'
 );
 
-const FALLBACK = ['Generic A?', 'Generic B?'] as const;
-
 // Each test gets its own scope: generated suggestions are cached per scope for
 // the life of the module, so a shared one would leak between tests.
 function Probe({ scope, enabled = true }: { scope: string; enabled?: boolean }) {
@@ -17,7 +15,6 @@ function Probe({ scope, enabled = true }: { scope: string; enabled?: boolean }) 
     command: 'suggest_meeting_questions',
     args: { meetingId: scope },
     scope,
-    fallback: FALLBACK,
     enabled,
   });
   return <ul>{suggestions.map(s => <li key={s}>{s}</li>)}</ul>;
@@ -72,43 +69,43 @@ describe('useSuggestedQuestions', () => {
     mock.restore();
   });
 
-  test('replaces the fallback once meeting-specific questions arrive', async () => {
+  test('shows nothing until meeting-specific questions arrive', async () => {
     const scope = 'replaces';
     invoke.setImpl(async () => 'Who owns compliance?\nWhat blocked the rollout?');
 
     const view = within(render(<Probe scope={scope} />).container);
+    expect(view.queryAllByRole('listitem')).toHaveLength(0);
     await waitFor(() => {
       expect(view.queryByText('Who owns compliance?')).not.toBeNull();
     });
-    expect(view.queryByText('Generic A?')).toBeNull();
   });
 
-  test('keeps the fallback when generation fails', async () => {
+  test('stays empty when generation fails', async () => {
     const scope = 'fails';
     invoke.setImpl(() => Promise.reject(new Error('No model configured')));
 
     const view = within(render(<Probe scope={scope} />).container);
     await act(async () => {});
 
-    expect(view.queryByText('Generic A?')).not.toBeNull();
+    expect(view.queryAllByRole('listitem')).toHaveLength(0);
   });
 
-  test('keeps the fallback when the reply has no usable question', async () => {
+  test('stays empty when the reply has no usable question', async () => {
     const scope = 'unusable';
     invoke.setImpl(async () => 'Nothing has been discussed yet.');
 
     const view = within(render(<Probe scope={scope} />).container);
     await act(async () => {});
 
-    expect(view.queryByText('Generic A?')).not.toBeNull();
+    expect(view.queryAllByRole('listitem')).toHaveLength(0);
   });
 
-  test('does not call the backend while disabled', async () => {
+  test('does not call the backend while disabled, and stays empty', async () => {
     const scope = 'disabled';
     const view = within(render(<Probe scope={scope} enabled={false} />).container);
     await act(async () => {});
 
     expect(invoke.calls).toEqual([]);
-    expect(view.queryByText('Generic A?')).not.toBeNull();
+    expect(view.queryAllByRole('listitem')).toHaveLength(0);
   });
 });

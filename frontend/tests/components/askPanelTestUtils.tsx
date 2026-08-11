@@ -2,6 +2,18 @@ import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
 import { cleanup, fireEvent, render, within, type RenderResult } from '@testing-library/react';
 import type { ReactElement } from 'react';
 
+// AskMeetingPanel/LiveAskPanel read the current model via `useConfig()` for
+// their footer label. The real ConfigProvider drags in Tauri event listeners
+// (which crash outside a Tauri webview) and its own invoke() calls (which
+// would ride the same mocked `invoke` the test under this is steering),
+// so it's stubbed here rather than mounted for real - same rationale as the
+// TranscriptContext stub in LiveAskPanel.test.tsx.
+mock.module('@/contexts/ConfigContext', () => ({
+  useConfig: () => ({
+    modelConfig: { provider: 'ollama', model: 'llama3.2:latest' },
+  }),
+}));
+
 export type InvokeCall = { cmd: string; args?: unknown };
 export type InvokeImpl = (cmd: string, args?: unknown) => Promise<string>;
 

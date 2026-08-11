@@ -445,6 +445,17 @@ const Sidebar: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    const handleShortcut = (e: KeyboardEvent) => {
+      if (e.key === ',' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        router.push('/settings');
+      }
+    };
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, [router]);
+
   const collapsedNavTileClass = (active: boolean) =>
     `flex h-10 w-10 items-center justify-center rounded-xl border transition-colors duration-150 ${active
       ? 'border-border/10 bg-secondary/[.09] text-foreground'
@@ -463,7 +474,19 @@ const Sidebar: React.FC = () => {
     return (
       <TooltipProvider>
         <div className="flex h-full flex-col items-center gap-[26px] px-2 pb-5 pt-5">
-          <Logo isCollapsed={isCollapsed} />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={toggleCollapse}
+                className="flex h-[34px] w-[34px] items-center justify-center rounded-lg border border-border/10 bg-gradient-to-br from-white/10 to-white/0 text-foreground transition-opacity hover:opacity-80"
+              >
+                <ChevronRightCircle className="w-5 h-5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              <p>Expand sidebar</p>
+            </TooltipContent>
+          </Tooltip>
 
           <Tooltip>
             <TooltipTrigger asChild>
@@ -676,18 +699,15 @@ const Sidebar: React.FC = () => {
 
   return (
     <div className="fixed left-3 top-3 bottom-3 z-40">
-      {/* Floating collapse button */}
-      <button
-        onClick={toggleCollapse}
-        className="glass-pill absolute -right-3 top-20 z-50 p-1.5 text-foreground hover:bg-secondary/20 transition-colors shadow-lg"
-        style={{ transform: 'translateX(50%)' }}
-      >
-        {isCollapsed ? (
-          <ChevronRightCircle className="w-6 h-6" />
-        ) : (
+      {!isCollapsed && (
+        <button
+          onClick={toggleCollapse}
+          className="glass-pill absolute -right-3 top-20 z-50 p-1.5 text-foreground hover:bg-secondary/20 transition-colors shadow-lg"
+          style={{ transform: 'translateX(50%)' }}
+        >
           <ChevronLeftCircle className="w-6 h-6" />
-        )}
-      </button>
+        </button>
+      )}
 
       <div
         className={`glass-rail h-full flex flex-col transition-all duration-300 ${isCollapsed ? 'w-20' : 'w-64'

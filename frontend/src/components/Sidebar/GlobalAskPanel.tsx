@@ -35,7 +35,7 @@ export function GlobalAskPanel() {
           disabled={isLoading}
           className="h-8 text-xs"
         />
-        <Button onClick={ask} disabled={isSubmitDisabled} size="sm" variant="outline" aria-label="Ask">
+        <Button onClick={() => ask()} disabled={isSubmitDisabled} size="sm" variant="outline" aria-label="Ask">
           {isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
         </Button>
       </div>

@@ -32,15 +32,17 @@ export function LiveActionChips({ chips, generate, isRecording }: UseLiveActionC
                 type="button"
                 onClick={() => generate(kind)}
                 disabled={isLoading || !isRecording}
-                className="glass-pill inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary/10 disabled:cursor-not-allowed disabled:opacity-50"
                 title={label}
+                className="group inline-flex items-center rounded-full bg-gradient-to-r from-accent-violet/70 to-primary/70 p-[1.5px] transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {isLoading ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Icon className="w-3.5 h-3.5" />
-                )}
-                {label}
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-background/95 px-3 py-1.5 text-xs font-medium text-foreground transition-colors group-hover:bg-secondary/10">
+                  {isLoading ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Icon className="w-3.5 h-3.5" />
+                  )}
+                  {label}
+                </span>
               </button>
             </PopoverTrigger>
             <PopoverContent className="w-80 max-h-80 overflow-y-auto text-sm" align="center" sideOffset={8}>

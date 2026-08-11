@@ -133,7 +133,6 @@ regex = "1.11.0"
 ndarray = "0.16"
 bytes = { version = "1.9.0", features = ["serde"] }
 
-esaxx-rs = "0.1.10"
 symphonia = { version = "0.5.4", features = ["aac", "isomp4", "mp3", "flac", "ogg", "vorbis", "pcm", "wav", "opt-simd"] }
 rand = "0.8.5"
 rayon = "1.10"
@@ -170,7 +169,6 @@ time = { version = "0.3", features = ["formatting"] }
 reqwest = { version = "0.11", features = ["multipart", "json"] }
 core-graphics = "0.23"
 cidre = { git = "https://github.com/yury/cidre", rev = "a9587fa", features = ["av"] }
-dasp = "0.11.0"
 futures-channel = "0.3.31"
 
 # PERFORMANCE: Enable Metal GPU + CoreML acceleration automatically on macOS
@@ -209,4 +207,3 @@ tracing-subscriber = "0.3.16"
 
 [patch.crates-io]
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "51c3b43" }
-esaxx-rs = { git = "https://github.com/thewh1teagle/esaxx-rs.git", branch = "feat/dynamic-msvc-link" }

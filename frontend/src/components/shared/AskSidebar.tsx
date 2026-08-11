@@ -1,13 +1,41 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, Check, Copy, Loader2, PanelRightClose, Sparkles } from 'lucide-react';
-import { Input } from '@/components/ui/input';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Textarea } from '@/components/ui/textarea';
 import { useAskAI } from '@/hooks/useAskAI';
 import { citedSegmentIds, parseAnswerCitations } from '@/lib/askCitations';
 import type { TranscriptSegmentData } from '@/types';
 import { CitationChip } from './CitationChip';
 import { cn } from '@/lib/utils';
+
+/** Renders inline markdown (bold, code, links, ...) without wrapping the
+ * result in a block-level `<p>`, so it can sit inline with citation chips
+ * inside the answer's own `<p>`. */
+function InlineMarkdown({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ p: ({ children }) => <>{children}</> }}>
+      {text}
+    </ReactMarkdown>
+  );
+}
+
+/** Three dots bouncing in sequence, iMessage-style, shown while an answer is generating. */
+function TypingBubble() {
+  return (
+    <div className="flex items-center gap-1 self-start rounded-[14px] rounded-bl-[4px] border border-border/[.12] bg-secondary/10 px-4 py-3">
+      {[0, 1, 2].map(i => (
+        <span
+          key={i}
+          className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground"
+          style={{ animationDelay: `${i * 0.15}s` }}
+        />
+      ))}
+    </div>
+  );
+}
 
 /**
  * Docked "ask this meeting" conversation, shared by the live recording screen
@@ -20,6 +48,9 @@ import { cn } from '@/lib/utils';
  * lines, the system prompt asks for those stamps back inline, and each one
  * renders as a chip that highlights (and scrolls to) its transcript segment.
  */
+/** Composer stops growing past this height and scrolls internally instead. */
+const COMPOSER_MAX_HEIGHT = 160;
+
 export interface AskSidebarProps {
   /** Tauri command to invoke, e.g. 'ask_about_meeting'. */
   command: string;
@@ -29,8 +60,8 @@ export interface AskSidebarProps {
   segments: TranscriptSegmentData[];
   placeholder: string;
   suggestions: readonly string[];
-  /** Footer line stating what the answers are drawn from. */
-  scopeNote: string;
+  /** Footer line naming the model answers are generated with. */
+  modelLabel: string;
   /** Blocks asking when there is nothing to answer from yet. */
   disabled?: boolean;
   disabledHint?: string;
@@ -41,6 +72,8 @@ export interface AskSidebarProps {
   /** Segment a citation chip was clicked on, for the transcript to scroll to. */
   onFocusSegment?: (segmentId: string) => void;
   onClose?: () => void;
+  /** Fires each time an answer finishes, for a caller showing this collapsed to flag it. */
+  onAnswered?: () => void;
 }
 
 export function AskSidebar({
@@ -49,15 +82,17 @@ export function AskSidebar({
   segments,
   placeholder,
   suggestions,
-  scopeNote,
+  modelLabel,
   disabled = false,
   disabledHint,
   fill = false,
   onCitedSegmentsChange,
   onFocusSegment,
   onClose,
+  onAnswered,
 }: AskSidebarProps) {
   const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const {
     question,
@@ -101,6 +136,27 @@ export function AskSidebar({
     return () => clearTimeout(timer);
   }, [copiedTurnId]);
 
+  // Fires on every new turn, not just while collapsed - it's cheap, and the
+  // caller (which knows its own open/collapsed state) decides what to do
+  // with it rather than this component tracking visibility itself.
+  const turnCountRef = useRef(turns.length);
+  useEffect(() => {
+    if (turns.length > turnCountRef.current) {
+      onAnswered?.();
+    }
+    turnCountRef.current = turns.length;
+  }, [turns.length, onAnswered]);
+
+  // Grows the composer with its content instead of scrolling a single line
+  // out of view. Reset to 'auto' first so shrinking (e.g. after submit)
+  // isn't stuck at the tallest height it ever reached.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
+  }, [question]);
+
   return (
     <aside
       className={cn(
@@ -131,7 +187,7 @@ export function AskSidebar({
             <p className="text-sm leading-relaxed text-foreground/85">
               {parseAnswerCitations(turn.answer).map((token, index) =>
                 token.kind === 'text' ? (
-                  <span key={index}>{token.text}</span>
+                  <InlineMarkdown key={index} text={token.text} />
                 ) : (
                   <CitationChip
                     key={index}
@@ -159,12 +215,9 @@ export function AskSidebar({
         ))}
 
         {pendingQuestion && (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-3" aria-live="polite" aria-label="Generating answer">
             <QuestionBubble question={pendingQuestion} />
-            <div className="flex items-center gap-2 text-xs text-muted-foreground" aria-live="polite">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Reading the transcript...
-            </div>
+            <TypingBubble />
           </div>
         )}
 
@@ -181,39 +234,44 @@ export function AskSidebar({
           <p className="text-xs text-muted-foreground">{disabledHint}</p>
         )}
 
-        <div className="mt-auto flex flex-col gap-2.5 pt-2">
-          <span className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground">
-            SUGGESTED
-          </span>
-          <div className="flex flex-wrap gap-2">
-            {suggestions.map(suggestion => (
-              <button
-                key={suggestion}
-                type="button"
-                onClick={() => setQuestion(suggestion)}
-                disabled={isLoading || disabled}
-                className="glass-pill px-3 py-1.5 text-xs text-foreground/75 transition-colors hover:bg-secondary/10 disabled:opacity-50"
-              >
-                {suggestion}
-              </button>
-            ))}
+        {suggestions.length > 0 && (
+          <div className="mt-auto flex flex-col gap-2.5 pt-2">
+            <span className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground">
+              SUGGESTED
+            </span>
+            <div className="flex flex-wrap gap-2">
+              {suggestions.map(suggestion => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  onClick={() => ask(suggestion)}
+                  disabled={isLoading || disabled}
+                  className="glass-pill px-3 py-1.5 text-xs text-foreground/75 transition-colors hover:bg-secondary/10 disabled:opacity-50"
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       <div className="flex shrink-0 flex-col gap-2.5 border-t border-border/10 bg-secondary/[.04] p-4">
-        <div className="flex items-center gap-2 rounded-xl border border-border/[.14] bg-background/40 px-1.5 py-1.5">
-          <Input
+        <div className="flex items-end gap-2 rounded-xl border border-border/[.14] bg-background/40 px-1.5 py-1.5">
+          <Textarea
+            ref={textareaRef}
+            rows={1}
             placeholder={placeholder}
             value={question}
             onChange={e => setQuestion(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={isLoading || disabled}
-            className="border-0 bg-transparent shadow-none focus-visible:ring-0"
+            className="min-h-0 resize-none border-0 bg-transparent px-1.5 py-1 shadow-none focus-visible:ring-0"
+            style={{ maxHeight: COMPOSER_MAX_HEIGHT }}
           />
           <button
             type="button"
-            onClick={ask}
+            onClick={() => ask()}
             disabled={isSubmitDisabled || disabled}
             aria-label="Ask"
             className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-accent-violet to-primary text-primary-foreground disabled:opacity-40"
@@ -222,7 +280,7 @@ export function AskSidebar({
           </button>
         </div>
         <div className="flex items-center gap-2 font-mono text-[10.5px] text-muted-foreground">
-          <span>{scopeNote}</span>
+          <span>{modelLabel}</span>
           <span className="ml-auto rounded border border-border/10 bg-secondary/[.07] px-1.5 py-0.5">⌘J</span>
         </div>
       </div>

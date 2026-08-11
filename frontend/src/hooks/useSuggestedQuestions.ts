@@ -6,10 +6,9 @@ import { invoke } from '@tauri-apps/api/core';
 /**
  * Questions worth asking about *this* meeting, generated from its own
  * transcript by `suggest_live_transcript_questions` /
- * `suggest_meeting_questions`. Falls back to the caller's generic list
- * whenever generation hasn't produced anything usable - no transcript yet, a
- * provider that isn't configured, an unparseable reply - so the composer
- * always has prefill chips to offer.
+ * `suggest_meeting_questions`. Returns nothing until generation actually
+ * produces something usable - a canned generic fallback reads as the same
+ * three chips on every meeting, which is worse than no chips at all.
  */
 
 const MAX_SUGGESTIONS = 3;
@@ -48,11 +47,12 @@ export function parseSuggestedQuestions(reply: string): string[] {
  */
 const cache = new Map<string, string[]>();
 
+const EMPTY_SUGGESTIONS: string[] = [];
+
 export function useSuggestedQuestions({
   command,
   args,
   scope,
-  fallback,
   enabled = true,
   refreshKey,
 }: {
@@ -61,11 +61,7 @@ export function useSuggestedQuestions({
   args: Record<string, unknown>;
   /** What these suggestions are about, e.g. a meeting id. Caches per scope. */
   scope: string;
-  fallback: readonly string[];
-  /**
-   * False while there is nothing to generate from yet (e.g. before the first
-   * words of a live meeting), which keeps the fallback chips showing.
-   */
+  /** False while there is nothing to generate from yet (e.g. before the first words of a live meeting). */
   enabled?: boolean;
   /**
    * Change this to regenerate. A live meeting keeps talking long after the
@@ -105,7 +101,7 @@ export function useSuggestedQuestions({
       })
       .catch(() => {
         // Suggestions are a convenience; a failure here should never surface
-        // as an error state - the caller's fallback list stands in silently.
+        // as an error state - the composer just shows no chips.
       });
 
     return () => {
@@ -113,5 +109,5 @@ export function useSuggestedQuestions({
     };
   }, [command, cacheKey, enabled]);
 
-  return generated ?? fallback;
+  return generated ?? EMPTY_SUGGESTIONS;
 }

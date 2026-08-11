@@ -40,10 +40,12 @@ pnpm run tauri:dev          # Full Tauri development mode
 pnpm run tauri:build        # Production build
 
 # GPU-Specific Builds (for testing acceleration)
-pnpm run tauri:dev:metal    # macOS Metal GPU
-pnpm run tauri:dev:cuda     # NVIDIA CUDA
-pnpm run tauri:dev:vulkan   # AMD/Intel Vulkan
-pnpm run tauri:dev:cpu      # CPU-only (no GPU)
+# tauri:dev/tauri:build auto-detect GPU via scripts/auto-detect-gpu.js.
+# Override with TAURI_GPU_FEATURE, e.g.:
+TAURI_GPU_FEATURE=metal pnpm run tauri:dev    # macOS Metal GPU
+TAURI_GPU_FEATURE=cuda pnpm run tauri:dev     # NVIDIA CUDA
+TAURI_GPU_FEATURE=vulkan pnpm run tauri:dev   # AMD/Intel Vulkan
+TAURI_GPU_FEATURE=none pnpm run tauri:dev     # CPU-only (no GPU)
 ```
 
 ### Legacy Backend Archive
@@ -98,7 +100,7 @@ Raw Audio (Mic + System)
 
 ### Audio Device Modularization (Recently Completed)
 
-**Context**: The audio system was refactored from a monolithic 1028-line `core.rs` file into focused modules. See [AUDIO_MODULARIZATION_PLAN.md](AUDIO_MODULARIZATION_PLAN.md) for details.
+**Context**: The audio system was refactored from a monolithic 1028-line `core.rs` file into focused modules.
 
 ```
 audio/

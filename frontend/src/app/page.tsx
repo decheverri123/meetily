@@ -1,8 +1,8 @@
 'use client';
 
-import { useCallback, useState, useEffect } from 'react';
+import { useCallback, useState, useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react';
 import { motion } from 'framer-motion';
-import { MessageSquareText, Sparkles } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 import { RecordingControls } from '@/components/RecordingControls';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -18,6 +18,7 @@ import { SettingsModals } from './_components/SettingsModal';
 import { TranscriptPanel } from './_components/TranscriptPanel';
 import { LiveInsightsPanel } from './_components/LiveInsightsPanel';
 import { LiveAskPanel } from './_components/LiveAskPanel';
+import { AskFloatingBubble } from './_components/AskFloatingBubble';
 import { LiveActionChips } from './_components/LiveActionChips';
 import { LiveActionChipModelPicker } from './_components/LiveActionChipModelPicker';
 import { LiveProviderIndicator } from './_components/LiveProviderIndicator';
@@ -38,24 +39,31 @@ export default function Home() {
   // Local page state (not moved to contexts)
   const [isRecording, setIsRecordingState] = useState(false);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
-  // Opt-in Live Insights panel - defaults to OFF so existing recording UX is unchanged.
-  const [showLiveInsights, setShowLiveInsights] = useState(false);
+  // Live Insights panel - open by default, the primary reason to be on this screen.
+  const [showLiveInsights, setShowLiveInsights] = useState(true);
   // Ad-hoc, session-only override of which provider/model powers live action
   // chip generation - set via LiveActionChipModelPicker. Deliberately not
   // persisted: null means "use the Settings-configured provider/model", which
   // must stay the default (see useLiveActionChips's modelOverride param).
   const [liveActionChipOverride, setLiveActionChipOverride] = useState<LiveActionChipModelOverride | null>(null);
-  // Ask sidebar: open by default while recording (it is the live screen's
-  // primary AI affordance), dismissible, and toggled with Cmd/Ctrl+J.
-  const [showAskPanel, setShowAskPanel] = useState(true);
+  // Ask panel: a floating chat bubble, collapsed by default, toggled with
+  // Cmd/Ctrl+J or by clicking the bubble.
+  const [showAskPanel, setShowAskPanel] = useState(false);
+  // Flags the bubble while collapsed - cleared as soon as it's opened.
+  const [hasAskUnread, setHasAskUnread] = useState(false);
   // Transcript segments the latest answer cited, and the one whose chip was
-  // last clicked. Held here because they are produced by the ask sidebar and
-  // consumed by the transcript column, which are siblings.
-  // Collapsed by default: the ask sidebar is the primary surface on this
+  // last clicked. Held here because they are produced by the ask panel and
+  // consumed by the transcript column, which are otherwise unrelated.
+  // Collapsed by default: Live Insights is the primary surface on this
   // screen now, and the transcript is a reference panel a user opts into.
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(true);
   const [citedSegmentIds, setCitedSegmentIds] = useState<string[]>([]);
   const [focusSegment, setFocusSegment] = useState<{ id: string } | null>(null);
+  // Transcript's share of the transcript+insights row when both are open;
+  // dragged via the divider between them.
+  const [transcriptSplit, setTranscriptSplit] = useState(0.5);
+  const [isDraggingSplit, setIsDraggingSplit] = useState(false);
+  const splitRowRef = useRef<HTMLDivElement>(null);
 
   // Use contexts for state management
   const { meetingTitle, transcripts } = useTranscripts();
@@ -101,7 +109,43 @@ export default function Home() {
   // meeting regardless of any panel visibility.
   const liveActionChips = useLiveActionChips(liveActionChipOverride);
 
-  useAskPanelShortcut(useCallback(() => setShowAskPanel(open => !open), []));
+  const toggleAskPanel = useCallback(() => {
+    setShowAskPanel(open => {
+      const next = !open;
+      if (next) setHasAskUnread(false);
+      return next;
+    });
+  }, []);
+  useAskPanelShortcut(toggleAskPanel);
+
+  // Shared by both LiveAskPanel triggers (a finished answer, a new suggestion
+  // batch) - either one flags the bubble while it's collapsed.
+  const flagAskUnread = useCallback(() => {
+    setHasAskUnread(current => current || !showAskPanel);
+  }, [showAskPanel]);
+
+  // Drag-to-resize the transcript/insights split. Listens on `window` rather
+  // than the divider itself so the drag keeps tracking even if the pointer
+  // outruns the thin handle mid-move.
+  const handleSplitPointerDown = useCallback((event: ReactPointerEvent) => {
+    event.preventDefault();
+    const row = splitRowRef.current;
+    if (!row) return;
+    setIsDraggingSplit(true);
+
+    const handleMove = (moveEvent: PointerEvent) => {
+      const rect = row.getBoundingClientRect();
+      const ratio = (moveEvent.clientX - rect.left) / rect.width;
+      setTranscriptSplit(Math.min(0.75, Math.max(0.25, ratio)));
+    };
+    const handleUp = () => {
+      setIsDraggingSplit(false);
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+    };
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+  }, []);
 
   useEffect(() => {
     // Track page view
@@ -266,76 +310,85 @@ export default function Home() {
           />
         ) : (
           <>
-            {/* Animates flex-basis/grow rather than width: this column is
-                flex-sized, so `width` never resolves to a value that could be
-                interpolated. Both endpoints are lengths, so they tween. */}
-            <div
-              className={cn(
-                'flex flex-col overflow-hidden transition-[flex-basis,flex-grow] duration-300 ease-out motion-reduce:transition-none',
-                transcriptCollapsed
-                  ? 'grow-0 basis-[44px] p-4'
-                  : showLiveInsights
-                    ? 'grow basis-1/2'
-                    : 'grow basis-0'
-              )}
-            >
-              <TranscriptPanel
-                isProcessingStop={isProcessingStop}
-                isStopping={isStopping}
-                showModal={showModal}
-                isCollapsed={transcriptCollapsed}
-                onToggleCollapse={() => setTranscriptCollapsed(collapsed => !collapsed)}
-                citedSegmentIds={citedSegmentIds}
-                focusSegment={focusSegment}
-              />
-            </div>
-
-            {/* Same slide-shut technique as the transcript column: the outer
-                clip tweens flex-basis while the inner content holds its
-                expanded min-width and crossfades, so it slides out rather
-                than squashing its contents mid-animation. */}
-            <div
-              className={cn(
-                'flex flex-col overflow-hidden transition-[flex-basis,flex-grow] duration-300 ease-out motion-reduce:transition-none',
-                showLiveInsights ? 'grow basis-1/2' : 'grow-0 basis-0'
-              )}
-            >
+            <div ref={splitRowRef} className="flex min-w-0 flex-1 overflow-hidden">
+              {/* Animates flex-basis/grow rather than width: this column is
+                  flex-sized, so `width` never resolves to a value that could be
+                  interpolated. Both endpoints are lengths, so they tween. */}
               <div
                 className={cn(
-                  'flex h-full min-w-[420px] flex-col transition-opacity duration-200 motion-reduce:transition-none',
-                  showLiveInsights ? 'opacity-100 delay-100' : 'pointer-events-none opacity-0'
+                  'flex flex-col overflow-hidden ease-out motion-reduce:transition-none',
+                  !isDraggingSplit && 'transition-[flex-basis,flex-grow] duration-300',
+                  transcriptCollapsed ? 'grow-0 basis-[44px] p-4' : 'grow'
                 )}
+                style={
+                  !transcriptCollapsed && showLiveInsights
+                    ? { flexBasis: `${transcriptSplit * 100}%` }
+                    : undefined
+                }
               >
-                <LiveInsightsPanel {...liveInsights} />
-              </div>
-            </div>
-
-            {/* pb-28 clears the floating transport bar, which is fixed at
-                bottom-12 (48px) and ~56px tall. */}
-            <div
-              className={cn(
-                'flex overflow-hidden p-4 pb-28 transition-[flex-basis,flex-grow] duration-300 ease-out motion-reduce:transition-none',
-                showAskPanel
-                  ? transcriptCollapsed && !showLiveInsights
-                    ? 'grow basis-0'
-                    : 'shrink-0 grow-0 basis-[432px]'
-                  : 'grow-0 basis-0 p-0'
-              )}
-            >
-              <div
-                className={cn(
-                  'flex h-full min-w-[400px] flex-1 transition-opacity duration-200 motion-reduce:transition-none',
-                  showAskPanel ? 'opacity-100 delay-100' : 'pointer-events-none opacity-0'
-                )}
-              >
-                <LiveAskPanel
-                  fill={transcriptCollapsed && !showLiveInsights}
-                  onCitedSegmentsChange={setCitedSegmentIds}
-                  onFocusSegment={id => setFocusSegment({ id })}
-                  onClose={() => setShowAskPanel(false)}
+                <TranscriptPanel
+                  isProcessingStop={isProcessingStop}
+                  isStopping={isStopping}
+                  showModal={showModal}
+                  isCollapsed={transcriptCollapsed}
+                  onToggleCollapse={() => setTranscriptCollapsed(collapsed => !collapsed)}
+                  citedSegmentIds={citedSegmentIds}
+                  focusSegment={focusSegment}
                 />
               </div>
+
+              {/* Draggable divider - only meaningful (and shown) once both
+                  neighbors are actually visible and share the row. */}
+              {!transcriptCollapsed && showLiveInsights && (
+                <div
+                  onPointerDown={handleSplitPointerDown}
+                  className="group relative z-10 -mx-1.5 w-3 shrink-0 cursor-col-resize touch-none"
+                >
+                  <div
+                    className={cn(
+                      'absolute inset-y-6 left-1/2 w-px -translate-x-1/2 rounded-full bg-border/10 transition-colors group-hover:bg-primary/50',
+                      isDraggingSplit && 'bg-primary/60'
+                    )}
+                  />
+                </div>
+              )}
+
+              {/* Same slide-shut technique as the transcript column: the outer
+                  clip tweens flex-basis while the inner content holds its
+                  expanded min-width and crossfades, so it slides out rather
+                  than squashing its contents mid-animation. */}
+              <div
+                className={cn(
+                  'flex flex-col overflow-hidden ease-out motion-reduce:transition-none',
+                  !isDraggingSplit && 'transition-[flex-basis,flex-grow] duration-300',
+                  showLiveInsights ? 'grow' : 'grow-0 basis-0'
+                )}
+                style={
+                  showLiveInsights && !transcriptCollapsed
+                    ? { flexBasis: `${(1 - transcriptSplit) * 100}%` }
+                    : undefined
+                }
+              >
+                <div
+                  className={cn(
+                    'flex h-full min-w-[420px] flex-col transition-opacity duration-200 motion-reduce:transition-none',
+                    showLiveInsights ? 'opacity-100 delay-100' : 'pointer-events-none opacity-0'
+                  )}
+                >
+                  <LiveInsightsPanel {...liveInsights} />
+                </div>
+              </div>
             </div>
+
+            <AskFloatingBubble open={showAskPanel} hasUnread={hasAskUnread} onOpen={toggleAskPanel}>
+              <LiveAskPanel
+                onCitedSegmentsChange={setCitedSegmentIds}
+                onFocusSegment={id => setFocusSegment({ id })}
+                onClose={() => setShowAskPanel(false)}
+                onAnswered={flagAskUnread}
+                onSuggestionsReady={flagAskUnread}
+              />
+            </AskFloatingBubble>
           </>
         )}
 
@@ -388,16 +441,6 @@ export default function Home() {
                     title={showLiveInsights ? 'Hide Live Insights' : 'Show Live Insights'}
                   >
                     <Sparkles className="w-4 h-4" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={showAskPanel ? 'default' : 'outline'}
-                    size="icon"
-                    className={cn('rounded-full h-9 w-9', !showAskPanel && 'glass-pill')}
-                    onClick={() => setShowAskPanel(prev => !prev)}
-                    title={showAskPanel ? 'Hide Ask panel (⌘J)' : 'Ask this meeting (⌘J)'}
-                  >
-                    <MessageSquareText className="w-4 h-4" />
                   </Button>
                 </div>
               </div>

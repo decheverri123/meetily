@@ -74,6 +74,11 @@ export function providerLabel(provider: string): string {
   return isOverrideProvider(provider) ? PROVIDER_LABELS[provider] : provider;
 }
 
+/** "<Provider> · <model>" footer label shared by the live and saved-meeting ask panels. */
+export function modelConfigLabel(config: { provider: string; model: string }): string {
+  return `${providerLabel(config.provider)} · ${config.model || 'default'}`;
+}
+
 async function fetchModelNames(provider: OverrideProvider, apiKey: string | null): Promise<string[]> {
   switch (provider) {
     case 'ollama': {

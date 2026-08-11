@@ -2,14 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Mic, Search, ShieldAlert, ShieldCheck, SlidersHorizontal, Upload } from 'lucide-react';
+import { Mic, Search, SlidersHorizontal, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { PermissionWarning } from '@/components/PermissionWarning';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
-import { useConfig } from '@/contexts/ConfigContext';
 import { useImportDialog } from '@/contexts/ImportDialogContext';
 import { ModalType } from '@/hooks/useModalState';
-import { cn } from '@/lib/utils';
 
 const SEARCH_DEBOUNCE_MS = 250;
 
@@ -38,31 +36,6 @@ function formatRecordedAt(date: Date): string {
   if (daysAgo === 0) return `Today · ${time}`;
   if (daysAgo === 1) return `Yesterday · ${time}`;
   return `${date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} · ${time}`;
-}
-
-interface DeviceStatusRowProps {
-  label: string;
-  deviceName: string | null;
-  /** null while the device probe is still in flight. */
-  isAvailable: boolean | null;
-}
-
-function DeviceStatusRow({ label, deviceName, isAvailable }: DeviceStatusRowProps) {
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-baseline gap-3 font-mono text-[11px] tracking-[0.12em] text-muted-foreground">
-        <span>{label}</span>
-        <span className={cn('ml-auto truncate text-right', isAvailable === false ? 'text-destructive' : 'text-foreground/75')}>
-          {isAvailable === null ? 'Checking…' : isAvailable ? (deviceName ?? 'System default') : 'Not detected'}
-        </span>
-      </div>
-      {/* Binary availability, not a live level meter - there is no audio level to
-          read while idle, so the bar is either full (device present) or empty. */}
-      <div className="h-[5px] overflow-hidden rounded-[3px] bg-secondary/10">
-        {isAvailable === true && <div className="h-full w-full rounded-[3px] bg-gradient-to-r from-success to-primary" />}
-      </div>
-    </div>
-  );
 }
 
 interface MeetingCardProps {
@@ -116,7 +89,6 @@ export function IdleHome({
 }: IdleHomeProps) {
   const router = useRouter();
   const { meetings, setCurrentMeeting, searchTranscripts, searchResults } = useSidebar();
-  const { selectedDevices } = useConfig();
   const { openImportDialog } = useImportDialog();
 
   const [query, setQuery] = useState('');
@@ -186,84 +158,53 @@ export function IdleHome({
 
   return (
     <div className="flex flex-1 flex-col gap-[22px] overflow-y-auto p-8">
-      <section className="glass-panel flex flex-none flex-col gap-11 rounded-3xl px-11 py-10 lg:flex-row">
-        <div className="flex flex-1 flex-col gap-4">
-          <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-            Ready · Nothing leaves this machine
-          </p>
-          <h1 className="text-[40px] font-semibold leading-tight tracking-[-0.03em] text-foreground">
-            Start a recording
-          </h1>
-          <p className="max-w-[52ch] text-[15.5px] leading-relaxed text-muted-foreground">
-            Your microphone and system audio are mixed locally, transcribed on device, and
-            summarised by your own model. Nothing is uploaded.
-          </p>
+      <section className="glass-panel flex flex-none flex-col gap-4 rounded-3xl px-11 py-10">
+        <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+          Ready · Nothing leaves this machine
+        </p>
+        <h1 className="text-[40px] font-semibold leading-tight tracking-[-0.03em] text-foreground">
+          Start a recording
+        </h1>
+        <p className="max-w-[52ch] text-[15.5px] leading-relaxed text-muted-foreground">
+          Your microphone and system audio are mixed locally, transcribed on device, and
+          summarised by your own model. Nothing is uploaded.
+        </p>
 
-          <div className="mt-2 flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={handleStartRecording}
-              className="flex items-center gap-2 rounded-2xl bg-destructive px-6 py-3 font-semibold text-white shadow-[0_10px_30px_-8px_hsl(var(--destructive)/0.7)] transition-colors hover:bg-destructive/90"
-            >
-              <Mic className="h-4 w-4" />
-              Record now
-            </button>
-            <button
-              type="button"
-              onClick={() => openImportDialog()}
-              className={SECONDARY_ACTION_CLASS}
-            >
-              <Upload className="h-4 w-4" />
-              Import audio
-            </button>
-            <button
-              type="button"
-              onClick={() => showModal('deviceSettings')}
-              className={SECONDARY_ACTION_CLASS}
-            >
-              <SlidersHorizontal className="h-4 w-4" />
-              Devices
-            </button>
-          </div>
-
-          {hasProbedDevices && (
-            <PermissionWarning
-              hasMicrophone={hasMicrophone}
-              hasSystemAudio={hasSystemAudio}
-              onRecheck={onRecheckPermissions}
-              isRechecking={isCheckingPermissions}
-            />
-          )}
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleStartRecording}
+            className="flex items-center gap-2 rounded-2xl bg-destructive px-6 py-3 font-semibold text-white shadow-[0_10px_30px_-8px_hsl(var(--destructive)/0.7)] transition-colors hover:bg-destructive/90"
+          >
+            <Mic className="h-4 w-4" />
+            Record now
+          </button>
+          <button
+            type="button"
+            onClick={() => openImportDialog()}
+            className={SECONDARY_ACTION_CLASS}
+          >
+            <Upload className="h-4 w-4" />
+            Import audio
+          </button>
+          <button
+            type="button"
+            onClick={() => showModal('deviceSettings')}
+            className={SECONDARY_ACTION_CLASS}
+          >
+            <SlidersHorizontal className="h-4 w-4" />
+            Devices
+          </button>
         </div>
 
-        <div className="flex w-full flex-none flex-col gap-4 rounded-2xl border border-border/10 bg-black/25 p-[22px] lg:w-[300px]">
-          <DeviceStatusRow
-            label="MIC"
-            deviceName={selectedDevices.micDevice}
-            isAvailable={hasProbedDevices ? hasMicrophone : null}
+        {hasProbedDevices && (
+          <PermissionWarning
+            hasMicrophone={hasMicrophone}
+            hasSystemAudio={hasSystemAudio}
+            onRecheck={onRecheckPermissions}
+            isRechecking={isCheckingPermissions}
           />
-          <DeviceStatusRow
-            label="SYSTEM"
-            deviceName={selectedDevices.systemDevice}
-            isAvailable={hasProbedDevices ? hasSystemAudio : null}
-          />
-          <div className="border-t border-border/10" />
-          <div className="flex items-center gap-2 font-mono text-[11px] tracking-[0.12em] text-muted-foreground">
-            {!hasProbedDevices ? (
-              <span>CHECKING PERMISSIONS…</span>
-            ) : hasMicrophone && hasSystemAudio ? (
-              <>
-                <ShieldCheck className="h-3.5 w-3.5 text-success" />
-                <span>PERMISSIONS GRANTED</span>
-              </>
-            ) : (
-              <>
-                <ShieldAlert className="h-3.5 w-3.5 text-destructive" />
-                <span>PERMISSIONS NEEDED</span>
-              </>
-            )}
-          </div>
-        </div>
+        )}
       </section>
 
       <section className="flex min-h-0 flex-1 flex-col gap-4">

@@ -1,4 +1,4 @@
-import { Cloud, ShieldCheck } from 'lucide-react';
+import { Cloud } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { ALWAYS_AVAILABLE_PROVIDERS, providerLabel } from './LiveActionChipModelPicker';
@@ -15,8 +15,8 @@ interface LiveProviderIndicatorProps {
 }
 
 /**
- * Always-visible "Local" vs "Cloud (Provider)" badge for the live action
- * chips and Live Insights panel.
+ * "Cloud (Provider)" badge for the live action chips and Live Insights panel,
+ * shown only when generation is actually leaving the machine.
  *
  * Meetily is positioned as privacy-first/local-only, but both features
  * follow whatever provider is configured in Settings (or the chips' ad-hoc
@@ -32,27 +32,26 @@ interface LiveProviderIndicatorProps {
 export function LiveProviderIndicator({ provider, className }: LiveProviderIndicatorProps) {
   const isLocal = (ALWAYS_AVAILABLE_PROVIDERS as string[]).includes(provider);
 
+  // Local is the default, privacy-first behavior - flagging it on every
+  // generation is noise. Only cloud usage (a meaningful exception) surfaces here.
+  if (isLocal) return null;
+
   return (
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger asChild>
           <span
             className={cn(
-              'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium whitespace-nowrap',
-              isLocal
-                ? 'border-success/20 bg-success/10 text-success'
-                : 'border-border/10 bg-secondary/10 text-muted-foreground',
+              'inline-flex items-center gap-1 rounded-full border border-border/10 bg-secondary/10 px-2 py-0.5 text-[11px] font-medium whitespace-nowrap text-muted-foreground',
               className
             )}
           >
-            {isLocal ? <ShieldCheck className="w-3 h-3" /> : <Cloud className="w-3 h-3" />}
-            {isLocal ? 'Local' : `Cloud · ${providerLabel(provider)}`}
+            <Cloud className="w-3 h-3" />
+            {`Cloud · ${providerLabel(provider)}`}
           </span>
         </TooltipTrigger>
         <TooltipContent side="bottom">
-          {isLocal
-            ? 'Transcript stays on this device (Built-in AI / Ollama).'
-            : `Transcript is sent to ${providerLabel(provider)}'s API for this generation.`}
+          {`Transcript is sent to ${providerLabel(provider)}'s API for this generation.`}
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>

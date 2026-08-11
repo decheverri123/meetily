@@ -4,19 +4,14 @@ import { useCallback } from 'react';
 import { AskSidebar } from '@/components/shared/AskSidebar';
 import type { TranscriptSegmentData } from '@/types';
 import { useSuggestedQuestions } from '@/hooks/useSuggestedQuestions';
+import { useConfig } from '@/contexts/ConfigContext';
+import { modelConfigLabel } from '@/app/_components/LiveActionChipModelPicker';
 
 /**
  * Ask sidebar for a saved meeting. Calls the single-shot `ask_about_meeting`
  * Tauri command, which builds its own context from the stored summary and
  * transcript - so unlike the live panel, only the meeting id goes over.
  */
-
-// Shown until the meeting's own suggestions come back (or if they never do).
-const FALLBACK_QUESTIONS = [
-  'What was decided?',
-  'Who owns the follow-ups?',
-  'tl;dr',
-] as const;
 
 interface AskMeetingPanelProps {
   meetingId: string;
@@ -39,11 +34,11 @@ export function AskMeetingPanel({
   onFocusSegment,
   onClose,
 }: AskMeetingPanelProps) {
+  const { modelConfig } = useConfig();
   const suggestions = useSuggestedQuestions({
     command: 'suggest_meeting_questions',
     args: { meetingId },
     scope: meetingId,
-    fallback: FALLBACK_QUESTIONS,
   });
 
   const buildArgs = useCallback(
@@ -58,7 +53,7 @@ export function AskMeetingPanel({
       segments={segments}
       placeholder="Ask a question about this meeting..."
       suggestions={suggestions}
-      scopeNote="ANSWERS FROM THIS MEETING ONLY"
+      modelLabel={modelConfigLabel(modelConfig)}
       onCitedSegmentsChange={onCitedSegmentsChange}
       onFocusSegment={onFocusSegment}
       onClose={onClose}

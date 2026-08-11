@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "npm --prefix frontend run dev",
     "build": "npm --prefix frontend run tauri:build",
-    "build:deploy": "cd frontend && ./clean_build.sh",
-    "run:deploy": "cd frontend && ./clean_run.sh",
+    "build:deploy": "npm --prefix frontend run clean:build",
+    "run:deploy": "npm --prefix frontend run clean:run",
     "build:web": "npm --prefix frontend run build",
     "start": "npm --prefix frontend run start",
     "lint": "npm --prefix frontend run lint",

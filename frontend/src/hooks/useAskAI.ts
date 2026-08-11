@@ -29,10 +29,17 @@ export interface UseAskAIResult {
   pendingQuestion: string | null;
   isLoading: boolean;
   error: string | null;
-  /** No-ops while a request is already in flight or the question is blank. */
-  ask: () => void;
-  /** Submits on Enter; shared so both ask panels bind the same key behavior. */
-  handleKeyDown: (e: KeyboardEvent<HTMLInputElement>) => void;
+  /**
+   * No-ops while a request is already in flight or the question is blank.
+   * Pass a question to send it directly (e.g. a clicked suggestion chip)
+   * without going through `setQuestion` first and racing its state update.
+   */
+  ask: (question?: string) => void;
+  /**
+   * Submits on Enter (Shift+Enter inserts a newline instead). Shared so both
+   * ask panels bind the same key behavior.
+   */
+  handleKeyDown: (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
   /** True while loading or the question is blank/whitespace-only. */
   isSubmitDisabled: boolean;
 }
@@ -103,8 +110,8 @@ export function useAskAI(
   // counter beats a timestamp/random id (and keeps tests deterministic).
   const nextTurnId = useRef(0);
 
-  const ask = useCallback(() => {
-    const trimmed = questionRef.current.trim();
+  const ask = useCallback((question?: string) => {
+    const trimmed = (question ?? questionRef.current).trim();
     if (!trimmed || isLoading) {
       return;
     }
@@ -113,7 +120,7 @@ export function useAskAI(
     setError(null);
     setAnswer(null);
     setPendingQuestion(trimmed);
-    if (clearQuestionOnSubmit) {
+    if (clearQuestionOnSubmit || question !== undefined) {
       setQuestion('');
     }
 
@@ -136,8 +143,9 @@ export function useAskAI(
   }, [command, isLoading, clearQuestionOnSubmit]);
 
   const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === 'Enter') {
+    (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
         ask();
       }
     },
