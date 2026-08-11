@@ -584,13 +584,3 @@ fn format_current_timestamp() -> String {
 
     format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
 }
-
-/// Format recording-relative time as [MM:SS]
-#[allow(dead_code)]
-fn format_recording_time(seconds: f64) -> String {
-    let total_seconds = seconds.floor() as u64;
-    let minutes = total_seconds / 60;
-    let secs = total_seconds % 60;
-
-    format!("[{:02}:{:02}]", minutes, secs)
-}

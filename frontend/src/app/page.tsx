@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Sparkles } from 'lucide-react';
+import { MessageSquareText, Sparkles } from 'lucide-react';
 import { RecordingControls } from '@/components/RecordingControls';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -28,6 +28,7 @@ import { useRecordingStop } from '@/hooks/useRecordingStop';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
 import { useLiveInsights } from '@/hooks/useLiveInsights';
 import { useLiveActionChips, LiveActionChipModelOverride } from '@/hooks/useLiveActionChips';
+import { useAskPanelShortcut } from '@/hooks/useAskPanelShortcut';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { indexedDBService } from '@/services/indexedDBService';
 import { toast } from 'sonner';
@@ -44,6 +45,15 @@ export default function Home() {
   // persisted: null means "use the Settings-configured provider/model", which
   // must stay the default (see useLiveActionChips's modelOverride param).
   const [liveActionChipOverride, setLiveActionChipOverride] = useState<LiveActionChipModelOverride | null>(null);
+  // Ask sidebar: open by default while recording (it is the live screen's
+  // primary AI affordance), dismissible, and toggled with Cmd/Ctrl+J.
+  const [showAskPanel, setShowAskPanel] = useState(true);
+  // Transcript segments the latest answer cited, and the one whose chip was
+  // last clicked. Held here because they are produced by the ask sidebar and
+  // consumed by the transcript column, which are siblings.
+  const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
+  const [citedSegmentIds, setCitedSegmentIds] = useState<string[]>([]);
+  const [focusSegment, setFocusSegment] = useState<{ id: string } | null>(null);
 
   // Use contexts for state management
   const { meetingTitle, transcripts } = useTranscripts();
@@ -88,6 +98,8 @@ export default function Home() {
   // keeps per-chip loading/result/error state mounted for the life of the
   // meeting regardless of any panel visibility.
   const liveActionChips = useLiveActionChips(liveActionChipOverride);
+
+  useAskPanelShortcut(useCallback(() => setShowAskPanel(open => !open), []));
 
   useEffect(() => {
     // Track page view
@@ -252,26 +264,39 @@ export default function Home() {
           />
         ) : (
           <>
-            <div className={cn('flex flex-col overflow-hidden', showLiveInsights ? 'w-1/2' : 'flex-1')}>
+            <div
+              className={cn(
+                'flex flex-col overflow-hidden',
+                transcriptCollapsed ? 'shrink-0 p-4' : showLiveInsights ? 'w-1/2' : 'flex-1'
+              )}
+            >
               <TranscriptPanel
                 isProcessingStop={isProcessingStop}
                 isStopping={isStopping}
                 showModal={showModal}
+                isCollapsed={transcriptCollapsed}
+                onToggleCollapse={() => setTranscriptCollapsed(collapsed => !collapsed)}
+                citedSegmentIds={citedSegmentIds}
+                focusSegment={focusSegment}
               />
-              {/* Docked below the (scrolling) transcript, inside its column so the
-                  showLiveInsights width split still applies. pb-28 clears the
-                  floating transport bar, which is fixed at bottom-12 (48px) and
-                  ~56px tall. */}
-              <div className="shrink-0 flex justify-center px-4 pb-28 pt-2">
-                <div className="w-full max-w-[750px]">
-                  <LiveAskPanel />
-                </div>
-              </div>
             </div>
 
             {showLiveInsights && (
-              <div className="w-1/2 flex flex-col overflow-hidden">
+              <div className="flex flex-1 flex-col overflow-hidden">
                 <LiveInsightsPanel {...liveInsights} />
+              </div>
+            )}
+
+            {/* pb-28 clears the floating transport bar, which is fixed at
+                bottom-12 (48px) and ~56px tall. */}
+            {showAskPanel && (
+              <div className={cn('flex p-4 pb-28', transcriptCollapsed && !showLiveInsights ? 'flex-1' : 'shrink-0')}>
+                <LiveAskPanel
+                  fill={transcriptCollapsed && !showLiveInsights}
+                  onCitedSegmentsChange={setCitedSegmentIds}
+                  onFocusSegment={id => setFocusSegment({ id })}
+                  onClose={() => setShowAskPanel(false)}
+                />
               </div>
             )}
           </>
@@ -326,6 +351,16 @@ export default function Home() {
                     title={showLiveInsights ? 'Hide Live Insights' : 'Show Live Insights'}
                   >
                     <Sparkles className="w-4 h-4" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={showAskPanel ? 'default' : 'outline'}
+                    size="icon"
+                    className={cn('rounded-full h-9 w-9', !showAskPanel && 'glass-pill')}
+                    onClick={() => setShowAskPanel(prev => !prev)}
+                    title={showAskPanel ? 'Hide Ask panel (⌘J)' : 'Ask this meeting (⌘J)'}
+                  >
+                    <MessageSquareText className="w-4 h-4" />
                   </Button>
                 </div>
               </div>

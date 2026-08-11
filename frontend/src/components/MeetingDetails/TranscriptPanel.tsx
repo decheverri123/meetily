@@ -4,6 +4,9 @@ import { Transcript, TranscriptSegmentData } from '@/types';
 import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
+import { PanelLeftClose } from 'lucide-react';
+import { CollapsedPanelRail } from '@/components/shared/CollapsedPanelRail';
+import { CitedSourcesPill } from '@/components/shared/CitedSourcesPill';
 import { useMemo } from 'react';
 
 interface TranscriptPanelProps {
@@ -23,6 +26,15 @@ interface TranscriptPanelProps {
   totalCount?: number;
   loadedCount?: number;
   onLoadMore?: () => void;
+
+  /** Collapses the panel to a narrow rail; the caller owns the state. */
+  isCollapsed?: boolean;
+  onToggleCollapse?: () => void;
+
+  /** Segments the ask sidebar's latest answer cited. */
+  citedSegmentIds?: readonly string[];
+  /** Segment a citation chip was clicked on, to scroll into view. */
+  focusSegment?: { id: string } | null;
 
   // Retranscription props
   meetingId?: string;
@@ -45,6 +57,10 @@ export function TranscriptPanel({
   totalCount,
   loadedCount,
   onLoadMore,
+  isCollapsed = false,
+  onToggleCollapse,
+  citedSegmentIds,
+  focusSegment = null,
   meetingId,
   meetingFolderPath,
   onRefetchTranscripts,
@@ -68,9 +84,33 @@ export function TranscriptPanel({
     ? (totalCount ?? convertedSegments.length)
     : (transcripts?.length || 0);
 
+  if (isCollapsed && onToggleCollapse) {
+    return (
+      <div className="hidden md:flex">
+        <CollapsedPanelRail
+          label="Transcript"
+          meta={`${segmentCount}`}
+          onExpand={onToggleCollapse}
+          expandTitle="Show transcript"
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="hidden md:flex w-80 lg:w-[380px] min-w-0 flex-col relative shrink-0 glass-panel overflow-hidden">
       <div className="flex items-center gap-3 p-4 border-b border-border/10">
+        {onToggleCollapse && (
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            title="Hide transcript"
+            aria-label="Hide transcript"
+            className="text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <PanelLeftClose className="h-4 w-4" />
+          </button>
+        )}
         <div className="min-w-0">
           <h2 className="text-[13px] font-semibold leading-tight text-foreground">Transcript</h2>
           <p className="mt-0.5 font-mono text-[11px] leading-tight text-muted-foreground">
@@ -88,6 +128,10 @@ export function TranscriptPanel({
         />
       </div>
 
+      <div className="px-4 pt-3 empty:hidden">
+        <CitedSourcesPill count={citedSegmentIds?.length ?? 0} />
+      </div>
+
       {/* Transcript content - use virtualized view for better performance */}
       <div className="flex-1 overflow-hidden pb-4">
         <VirtualizedTranscriptView
@@ -99,6 +143,8 @@ export function TranscriptPanel({
           enableStreaming={false}
           showConfidence={true}
           disableAutoScroll={disableAutoScroll}
+          highlightedSegmentIds={citedSegmentIds}
+          focusSegment={focusSegment}
           hasMore={hasMore}
           isLoadingMore={isLoadingMore}
           totalCount={totalCount}

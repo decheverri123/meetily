@@ -2,14 +2,16 @@ import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptVie
 import { PermissionWarning } from '@/components/PermissionWarning';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, GlobeIcon } from 'lucide-react';
+import { Copy, GlobeIcon, PanelLeftClose } from 'lucide-react';
+import { CollapsedPanelRail } from '@/components/shared/CollapsedPanelRail';
+import { CitedSourcesPill } from '@/components/shared/CitedSourcesPill';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
 import { ModalType } from '@/hooks/useModalState';
 import { useIsLinux } from '@/hooks/usePlatform';
-import { useMemo } from 'react';
+import { useTranscriptSegments } from '@/hooks/useTranscriptSegments';
 
 /**
  * TranscriptPanel Component
@@ -23,12 +25,23 @@ interface TranscriptPanelProps {
   isProcessingStop: boolean;
   isStopping: boolean;
   showModal: (name: ModalType, message?: string) => void;
+  /** Collapses the panel to a narrow rail; the caller owns the state. */
+  isCollapsed?: boolean;
+  onToggleCollapse?: () => void;
+  /** Segments the live ask panel's latest answer cited. */
+  citedSegmentIds?: readonly string[];
+  /** Segment a citation chip was clicked on, to scroll into view. */
+  focusSegment?: { id: string } | null;
 }
 
 export function TranscriptPanel({
   isProcessingStop,
   isStopping,
-  showModal
+  showModal,
+  isCollapsed = false,
+  onToggleCollapse,
+  citedSegmentIds,
+  focusSegment = null,
 }: TranscriptPanelProps) {
   // Contexts
   const { transcripts, transcriptContainerRef, copyTranscript } = useTranscripts();
@@ -37,17 +50,18 @@ export function TranscriptPanel({
   const { checkPermissions, isChecking, hasSystemAudio, hasMicrophone } = usePermissionCheck();
   const isLinux = useIsLinux();
 
-  // Convert transcripts to segments for virtualized view
-  const segments = useMemo(() =>
-    transcripts.map(t => ({
-      id: t.id,
-      timestamp: t.audio_start_time ?? 0,
-      endTime: t.audio_end_time,
-      text: t.text,
-      confidence: t.confidence,
-    })),
-    [transcripts]
-  );
+  const segments = useTranscriptSegments();
+
+  if (isCollapsed && onToggleCollapse) {
+    return (
+      <CollapsedPanelRail
+        label="Transcript"
+        meta={`${segments.length}`}
+        onExpand={onToggleCollapse}
+        expandTitle="Show transcript"
+      />
+    );
+  }
 
   return (
     <div ref={transcriptContainerRef} className="w-full border-r border-border/10 flex flex-col overflow-y-auto">
@@ -56,6 +70,17 @@ export function TranscriptPanel({
           <div className="flex  flex-col space-y-2">
             <div className="flex justify-center  items-center space-x-2">
               <ButtonGroup>
+                {onToggleCollapse && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={onToggleCollapse}
+                    title="Hide Transcript"
+                    aria-label="Hide transcript"
+                  >
+                    <PanelLeftClose />
+                  </Button>
+                )}
                 {transcripts?.length > 0 && (
                   <Button
                     variant="outline"
@@ -83,6 +108,9 @@ export function TranscriptPanel({
                   </Button>
                 }
               </ButtonGroup>
+            </div>
+            <div className="flex justify-center empty:hidden">
+              <CitedSourcesPill count={citedSegmentIds?.length ?? 0} />
             </div>
           </div>
         </div>
@@ -112,6 +140,8 @@ export function TranscriptPanel({
               isStopping={isStopping}
               enableStreaming={isRecording}
               showConfidence={true}
+              highlightedSegmentIds={citedSegmentIds}
+              focusSegment={focusSegment}
             />
           </div>
         </div>

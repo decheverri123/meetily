@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useReducer, startTransition, useEffect, useState, memo } from "react";
+import { useCallback, useRef, useReducer, startTransition, useEffect, useMemo, useState, memo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
@@ -9,6 +9,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
+import { formatRecordingTime } from "@/lib/transcriptTime";
+import { cn } from "@/lib/utils";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -27,6 +29,16 @@ export interface VirtualizedTranscriptViewProps {
     showConfidence?: boolean;
     /** Completely disable auto-scroll behavior (for meeting details page) */
     disableAutoScroll?: boolean;
+    /** Segments an AI answer cited, rendered as highlighted sources */
+    highlightedSegmentIds?: readonly string[];
+    /**
+     * Segment to scroll into view. Handled here rather than by the caller
+     * because past VIRTUALIZATION_THRESHOLD an off-screen segment has no DOM
+     * node to scroll to - only the virtualizer owned by this component can
+     * reach it. Wrapped in an object so re-requesting the same segment (after
+     * scrolling away from it) is a new value and scrolls again.
+     */
+    focusSegment?: { id: string } | null;
 
     // Pagination props (infinite scroll)
     hasMore?: boolean;
@@ -38,17 +50,6 @@ export interface VirtualizedTranscriptViewProps {
 
 // Threshold for enabling virtualization (below this, use simple rendering)
 const VIRTUALIZATION_THRESHOLD = 10;
-
-// Helper function to format seconds as recording-relative time [MM:SS]
-function formatRecordingTime(seconds: number | undefined): string {
-    if (seconds === undefined) return '[--:--]';
-
-    const totalSeconds = Math.floor(seconds);
-    const minutes = Math.floor(totalSeconds / 60);
-    const secs = totalSeconds % 60;
-
-    return `[${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
-}
 
 // Helper function to remove filler words and repetitions
 function cleanStopWords(text: string): string {
@@ -71,6 +72,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     confidence,
     isStreaming,
     showConfidence,
+    isHighlighted = false,
 }: {
     id: string;
     timestamp: number;
@@ -78,15 +80,25 @@ const TranscriptSegment = memo(function TranscriptSegment({
     confidence?: number;
     isStreaming: boolean;
     showConfidence: boolean;
+    isHighlighted?: boolean;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
 
     return (
-        <div id={`segment-${id}`} className="mb-3">
+        <div
+            id={`segment-${id}`}
+            className={cn(
+                "mb-3",
+                isHighlighted && "rounded-xl border-l-2 border-primary bg-primary/10 -mx-3 px-3 py-2"
+            )}
+        >
             <div className="flex items-start gap-2">
                 <Tooltip>
                     <TooltipTrigger>
-                        <span className="text-xs text-muted-foreground mt-1 flex-shrink-0 min-w-[50px] font-mono">
+                        <span className={cn(
+                            "text-xs mt-1 flex-shrink-0 min-w-[50px] font-mono",
+                            isHighlighted ? "text-primary" : "text-muted-foreground"
+                        )}>
                             {formatRecordingTime(timestamp)}
                         </span>
                     </TooltipTrigger>
@@ -119,6 +131,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     enableStreaming = false,
     showConfidence = true,
     disableAutoScroll = false,
+    highlightedSegmentIds,
+    focusSegment = null,
     hasMore = false,
     isLoadingMore = false,
     totalCount = 0,
@@ -223,6 +237,29 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     // Use simple rendering for small lists, virtualization for large lists
     const useVirtualization = segments.length >= VIRTUALIZATION_THRESHOLD;
 
+    const highlighted = useMemo(
+        () => new Set(highlightedSegmentIds ?? []),
+        [highlightedSegmentIds]
+    );
+
+    // Bring a cited segment into view. The virtualized path has to go through
+    // the virtualizer (the node may not exist yet); the simple path can scroll
+    // the rendered node directly.
+    useEffect(() => {
+        if (!focusSegment) return;
+
+        const index = segments.findIndex(segment => segment.id === focusSegment.id);
+        if (index === -1) return;
+
+        if (segments.length >= VIRTUALIZATION_THRESHOLD) {
+            virtualizer.scrollToIndex(index, { align: 'center' });
+        } else {
+            document
+                .getElementById(`segment-${focusSegment.id}`)
+                ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }, [focusSegment, segments, virtualizer]);
+
     return (
         <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
             {/* Recording Status Bar - Sticky at top, always visible when recording */}
@@ -296,6 +333,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         confidence={segment.confidence}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        isHighlighted={highlighted.has(segment.id)}
                                     />
                                 </div>
                             );
@@ -352,6 +390,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         confidence={segment.confidence}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        isHighlighted={highlighted.has(segment.id)}
                                     />
                                 </motion.div>
                             );

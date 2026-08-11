@@ -493,7 +493,10 @@ const ASK_LIVE_TRANSCRIPT_CONTEXT_MAX_CHARS: usize = 40_000;
 
 const ASK_ABOUT_MEETING_SYSTEM_PROMPT: &str = "You are answering a question about a specific \
 meeting using its transcript and/or summary as context. Answer only from the provided context. \
-If the answer isn't in the context, say so plainly.";
+If the answer isn't in the context, say so plainly. Transcript lines are prefixed with a [MM:SS] \
+timestamp; cite the lines you relied on by repeating their timestamp inline in that exact \
+bracketed form, placed right after the claim it supports. Cite only timestamps that appear in \
+the transcript, and do not invent or adjust them.";
 
 const ASK_ACROSS_MEETINGS_SYSTEM_PROMPT: &str = "You are answering a question that may span \
 multiple meetings, using each meeting's summary as context. When relevant, mention which \
@@ -504,7 +507,10 @@ const ASK_LIVE_TRANSCRIPT_SYSTEM_PROMPT: &str = "You are answering a question ab
 that is currently IN PROGRESS, using the transcript captured so far as context. That transcript \
 may be partial or incomplete, and the rest of the meeting has not happened yet. Answer only from \
 the provided context. If the answer isn't in it yet, say so plainly rather than speculating \
-about what has not been said.";
+about what has not been said. Transcript lines are prefixed with a [MM:SS] timestamp; cite the \
+lines you relied on by repeating their timestamp inline in that exact bracketed form, placed \
+right after the claim it supports. Cite only timestamps that appear in the transcript, and do \
+not invent or adjust them.";
 
 /// Validates a user-submitted question: non-empty after trimming, and no
 /// longer than `ASK_QUESTION_MAX_CHARS`. Returns the trimmed question on

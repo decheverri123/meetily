@@ -6,6 +6,19 @@ pub fn format_timestamp(seconds: f64) -> String {
     format!("{:02}:{:02}:{:02}", hours, minutes, secs)
 }
 
+/// Formats recording-relative time as `[MM:SS]`, minutes unbounded so a long
+/// meeting reads `[90:12]` rather than rolling into an hours field. Must stay
+/// byte-identical to the frontend's `formatRecordingTime`: the ask panels cite
+/// transcript lines by this exact stamp, and a mismatch silently drops every
+/// citation on the floor.
+pub fn format_recording_time(seconds: f64) -> String {
+    let total_seconds = seconds.max(0.0).floor() as u64;
+    let minutes = total_seconds / 60;
+    let secs = total_seconds % 60;
+
+    format!("[{:02}:{:02}]", minutes, secs)
+}
+
 /// Opens macOS System Settings to a specific privacy preference pane
 #[cfg(target_os = "macos")]
 #[tauri::command]

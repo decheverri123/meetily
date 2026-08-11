@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { Summary, SummaryResponse } from '@/types';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
@@ -10,6 +10,9 @@ import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { AskMeetingPanel } from '@/components/MeetingDetails/AskMeetingPanel';
 import { ModelConfig } from '@/components/ModelSettingsModal';
+import { Button } from '@/components/ui/button';
+import { MessageSquareText } from 'lucide-react';
+import { useAskPanelShortcut } from '@/hooks/useAskPanelShortcut';
 
 // Custom hooks
 import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
@@ -58,6 +61,12 @@ export default function PageContent({
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const [isRecording] = useState(false);
   const [summaryResponse] = useState<SummaryResponse | null>(null);
+  // Ask sidebar: docked beside the note, dismissible, toggled with Cmd/Ctrl+J.
+  const [showAskPanel, setShowAskPanel] = useState(true);
+  // Produced by the ask sidebar, consumed by the transcript column beside it.
+  const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
+  const [citedSegmentIds, setCitedSegmentIds] = useState<string[]>([]);
+  const [focusSegment, setFocusSegment] = useState<{ id: string } | null>(null);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
   const openModelSettingsRef = useRef<(() => void) | null>(null);
@@ -135,6 +144,8 @@ export default function PageContent({
     meeting,
   });
 
+  useAskPanelShortcut(useCallback(() => setShowAskPanel(open => !open), []));
+
   // Track page view
   useEffect(() => {
     Analytics.trackPageView('meeting_details');
@@ -186,6 +197,8 @@ export default function PageContent({
           onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
           isRecording={isRecording}
           disableAutoScroll={true}
+          isCollapsed={transcriptCollapsed}
+          onToggleCollapse={() => setTranscriptCollapsed(collapsed => !collapsed)}
           // Pagination props for efficient loading
           usePagination={true}
           segments={segments}
@@ -194,6 +207,8 @@ export default function PageContent({
           totalCount={totalCount}
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
+          citedSegmentIds={citedSegmentIds}
+          focusSegment={focusSegment}
           // Retranscription props
           meetingId={meeting.id}
           meetingFolderPath={meeting.folder_path}
@@ -234,9 +249,26 @@ export default function PageContent({
           isModelConfigLoading={false}
           onOpenModelSettings={handleRegisterModalOpen}
         />
-      </div>
-      <div className="relative z-10">
-        <AskMeetingPanel meetingId={meeting.id} />
+        {showAskPanel ? (
+          <AskMeetingPanel
+            meetingId={meeting.id}
+            segments={segments}
+            onCitedSegmentsChange={setCitedSegmentIds}
+            onFocusSegment={id => setFocusSegment({ id })}
+            onClose={() => setShowAskPanel(false)}
+          />
+        ) : (
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="glass-pill h-9 w-9 shrink-0 rounded-full"
+            onClick={() => setShowAskPanel(true)}
+            title="Ask this meeting (⌘J)"
+          >
+            <MessageSquareText className="h-4 w-4" />
+          </Button>
+        )}
       </div>
     </motion.div>
   );

@@ -137,6 +137,11 @@ impl MeetingsRepository {
     /// `ask_about_meeting`, which only ever keeps the tail of the transcript
     /// after truncating to a char budget anyway.
     ///
+    /// Each line is prefixed with its `[MM:SS]` recording-relative stamp so
+    /// the LLM can cite the lines it used and the UI can resolve those
+    /// citations back to transcript segments. The prefixes are not counted
+    /// against `max_chars` (see the may-return-more note below).
+    ///
     /// Relies on SQLite's `LENGTH()` counting Unicode characters (not bytes)
     /// for well-formed UTF-8 TEXT, matching the char-based truncation the
     /// caller applies on top. May return slightly more than `max_chars`
@@ -157,9 +162,9 @@ impl MeetingsRepository {
             return Ok(String::new());
         }
 
-        let rows: Vec<(String,)> = sqlx::query_as(
+        let rows: Vec<(String, Option<f64>)> = sqlx::query_as(
             r#"
-            SELECT transcript FROM (
+            SELECT transcript, audio_start_time FROM (
                 SELECT transcript, audio_start_time, id,
                        SUM(LENGTH(transcript)) OVER (
                            ORDER BY audio_start_time DESC, id DESC
@@ -178,7 +183,13 @@ impl MeetingsRepository {
 
         Ok(rows
             .into_iter()
-            .map(|(text,)| text)
+            .map(|(text, audio_start_time)| {
+                format!(
+                    "{} {}",
+                    crate::utils::format_recording_time(audio_start_time.unwrap_or(0.0)),
+                    text
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n"))
     }
@@ -371,7 +382,15 @@ mod tests {
             .await
             .expect("query failed");
 
-        assert_eq!(result, format!("{}\n{}\n{}", "C".repeat(10), "D".repeat(10), "E".repeat(10)));
+        assert_eq!(
+            result,
+            format!(
+                "[00:02] {}\n[00:03] {}\n[00:04] {}",
+                "C".repeat(10),
+                "D".repeat(10),
+                "E".repeat(10)
+            )
+        );
         assert!(!result.contains('B'));
         assert!(!result.contains('A'));
     }
@@ -388,7 +407,15 @@ mod tests {
             .await
             .expect("query failed");
 
-        assert_eq!(result, format!("{}\n{}\n{}", "A".repeat(5), "B".repeat(5), "C".repeat(5)));
+        assert_eq!(
+            result,
+            format!(
+                "[00:00] {}\n[00:01] {}\n[00:02] {}",
+                "A".repeat(5),
+                "B".repeat(5),
+                "C".repeat(5)
+            )
+        );
     }
 
     #[tokio::test]

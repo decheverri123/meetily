@@ -3,10 +3,30 @@
 import { useCallback, useRef, useState, type KeyboardEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
+/** One completed question/answer exchange, oldest first. */
+export interface AskTurn {
+  id: string;
+  question: string;
+  answer: string;
+}
+
+export interface UseAskAIOptions {
+  /**
+   * Empties the input as soon as a question is dispatched. Wanted by the
+   * threaded live panel, where the asked question moves into the transcript
+   * of the conversation; the single-answer panels keep it in place.
+   */
+  clearQuestionOnSubmit?: boolean;
+}
+
 export interface UseAskAIResult {
   question: string;
   setQuestion: (value: string) => void;
   answer: string | null;
+  /** Every answered exchange this session, for panels that show a thread. */
+  turns: AskTurn[];
+  /** The in-flight question, so a thread can show it before the answer lands. */
+  pendingQuestion: string | null;
   isLoading: boolean;
   error: string | null;
   /** No-ops while a request is already in flight or the question is blank. */
@@ -52,15 +72,22 @@ function extractErrorMessage(err: unknown): string | null {
  * resolves once with the answer text (not streamed/polled), so there's only
  * idle / loading / answer / error to track.
  *
+ * Answered exchanges also accumulate in `turns` for panels that render the
+ * whole conversation rather than just the latest answer.
+ *
  * @param command Tauri command name to invoke, e.g. 'ask_about_meeting'.
  * @param buildArgs Builds the invoke() args from the trimmed question.
+ * @param options Opt-in behavior; see {@link UseAskAIOptions}.
  */
 export function useAskAI(
   command: string,
-  buildArgs: (question: string) => Record<string, unknown>
+  buildArgs: (question: string) => Record<string, unknown>,
+  options: UseAskAIOptions = {}
 ): UseAskAIResult {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState<string | null>(null);
+  const [turns, setTurns] = useState<AskTurn[]>([]);
+  const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -70,6 +97,11 @@ export function useAskAI(
   questionRef.current = question;
   const buildArgsRef = useRef(buildArgs);
   buildArgsRef.current = buildArgs;
+  const clearQuestionOnSubmit = options.clearQuestionOnSubmit ?? false;
+
+  // Turn ids only have to be stable and unique within one mounted panel, so a
+  // counter beats a timestamp/random id (and keeps tests deterministic).
+  const nextTurnId = useRef(0);
 
   const ask = useCallback(() => {
     const trimmed = questionRef.current.trim();
@@ -80,10 +112,18 @@ export function useAskAI(
     setIsLoading(true);
     setError(null);
     setAnswer(null);
+    setPendingQuestion(trimmed);
+    if (clearQuestionOnSubmit) {
+      setQuestion('');
+    }
 
     invoke<string>(command, buildArgsRef.current(trimmed))
       .then(result => {
         setAnswer(result);
+        setTurns(prev => [
+          ...prev,
+          { id: `turn-${nextTurnId.current++}`, question: trimmed, answer: result },
+        ]);
       })
       .catch((err: unknown) => {
         const message = extractErrorMessage(err);
@@ -91,8 +131,9 @@ export function useAskAI(
       })
       .finally(() => {
         setIsLoading(false);
+        setPendingQuestion(null);
       });
-  }, [command, isLoading]);
+  }, [command, isLoading, clearQuestionOnSubmit]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>) => {
@@ -105,5 +146,16 @@ export function useAskAI(
 
   const isSubmitDisabled = isLoading || !question.trim();
 
-  return { question, setQuestion, answer, isLoading, error, ask, handleKeyDown, isSubmitDisabled };
+  return {
+    question,
+    setQuestion,
+    answer,
+    turns,
+    pendingQuestion,
+    isLoading,
+    error,
+    ask,
+    handleKeyDown,
+    isSubmitDisabled,
+  };
 }
