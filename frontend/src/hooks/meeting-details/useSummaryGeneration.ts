@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { Transcript, Summary } from '@/types';
+import { Transcript, Summary, SummaryDataResponse, SummaryTemplate } from '@/types';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
@@ -7,11 +7,39 @@ import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { isOllamaNotInstalledError } from '@/lib/utils';
 import { BuiltInModelInfo } from '@/lib/builtin-ai';
+import { AUTO_TEMPLATE_ID, GENERATED_TEMPLATE_ID } from './useTemplates';
 import {
   detectAndCacheSummaryLanguage,
   readMeetingSummaryLanguage,
   readCachedDetectedSummaryLanguage,
 } from '@/lib/summary-language-preferences';
+
+/**
+ * Decides the `templateId`/`customTemplateJson` pair to send with
+ * `api_process_transcript`. Pulled out of `processSummary` so the one piece
+ * of real branching logic in this file is directly unit-testable.
+ *
+ * `custom_template_json` takes precedence over `template_id` on the Rust
+ * side (see `plan_template_resolution` in src-tauri/src/summary/service.rs),
+ * so sending it alone is enough — `templateId` is simply omitted whenever
+ * `customTemplateJson` is present.
+ */
+export function buildTemplateInvokePayload(
+  selectedTemplate: string,
+  generatedTemplate: SummaryTemplate | null
+): { templateId?: string; customTemplateJson?: string } {
+  if (selectedTemplate === GENERATED_TEMPLATE_ID && generatedTemplate) {
+    return { customTemplateJson: JSON.stringify(generatedTemplate) };
+  }
+
+  // A stale '__generated__' selection with no cached template (or the plain
+  // 'auto' sentinel) both fall through to a fresh auto-select.
+  const templateId = selectedTemplate === AUTO_TEMPLATE_ID || selectedTemplate === GENERATED_TEMPLATE_ID
+    ? AUTO_TEMPLATE_ID
+    : selectedTemplate;
+
+  return { templateId };
+}
 
 async function resolveSummaryLanguage(
   meetingId: string,
@@ -56,6 +84,8 @@ interface UseSummaryGenerationProps {
   modelConfig: ModelConfig;
   isModelConfigLoading: boolean;
   selectedTemplate: string;
+  generatedTemplate: SummaryTemplate | null;
+  onTemplateResolved: (data: SummaryDataResponse | null | undefined) => void;
   onMeetingUpdated?: () => Promise<void>;
   updateMeetingTitle: (title: string) => void;
   setAiSummary: (summary: Summary | null) => void;
@@ -68,6 +98,8 @@ export function useSummaryGeneration({
   modelConfig,
   isModelConfigLoading,
   selectedTemplate,
+  generatedTemplate,
+  onTemplateResolved,
   onMeetingUpdated,
   updateMeetingTitle,
   setAiSummary,
@@ -155,7 +187,7 @@ export function useSummaryGeneration({
         chunkSize: 40000,
         overlap: 1000,
         customPrompt: customPrompt,
-        templateId: selectedTemplate,
+        ...buildTemplateInvokePayload(selectedTemplate, generatedTemplate),
         summaryLanguage,
       }) as any;
 
@@ -179,6 +211,7 @@ export function useSummaryGeneration({
             if (existingSummary?.data) {
               console.log('Restored previous summary after cancellation');
               setAiSummary(existingSummary.data);
+              onTemplateResolved(existingSummary.data);
               setSummaryStatus('completed');
             } else {
               setSummaryStatus('idle');
@@ -207,6 +240,7 @@ export function useSummaryGeneration({
               if (existingSummary?.data) {
                 console.log('Restored previous summary after regeneration failure');
                 setAiSummary(existingSummary.data);
+                onTemplateResolved(existingSummary.data);
                 setSummaryStatus('completed');
                 setSummaryError(null);
 
@@ -264,6 +298,8 @@ export function useSummaryGeneration({
         // Handle successful completion
         if (pollingResult.status === 'completed' && pollingResult.data) {
           console.log('Summary generation completed:', pollingResult.data);
+
+          onTemplateResolved(pollingResult.data);
 
           // Update meeting title if available
           const meetingName = pollingResult.data.MeetingName || pollingResult.meetingName;
@@ -392,6 +428,8 @@ export function useSummaryGeneration({
     meeting.created_at,
     modelConfig,
     selectedTemplate,
+    generatedTemplate,
+    onTemplateResolved,
     startSummaryPolling,
     setAiSummary,
     updateMeetingTitle,

@@ -7,6 +7,7 @@ use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
     extract_meeting_name_from_markdown, generate_meeting_summary, language_name_from_code,
 };
+use crate::summary::template_commands::TemplateInfo;
 use crate::summary::templates::{self, Template};
 use crate::ollama::metadata::ModelMetadataCache;
 use serde::{Deserialize, Serialize};
@@ -130,15 +131,52 @@ fn template_cache_fingerprint(template: &Template) -> String {
     stable_text_fingerprint(&rendered_template)
 }
 
+/// `template_id` value that requests LLM-driven template selection/generation
+/// (via `templates::select_template`) rather than a concrete template.
+const AUTO_TEMPLATE_ID: &str = "auto";
+
+/// The three ways `process_transcript_background` can resolve a `Template`
+/// for a summary run, decided from `custom_template_json`/`template_id`
+/// alone (no IO). Split out so this decision is unit-testable without a
+/// live LLM/template store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemplateResolutionPlan {
+    /// Reuse a caller-supplied template verbatim (e.g. "Regenerate" reusing a
+    /// template a prior `AutoSelect` run already generated) — no LLM call.
+    UseCustomJson,
+    /// Ask the LLM to match an existing template or design a new one.
+    AutoSelect,
+    /// Load a specific template by id, as before this feature existed.
+    UseTemplateId,
+}
+
+fn plan_template_resolution(
+    custom_template_json: Option<&str>,
+    template_id: &str,
+) -> TemplateResolutionPlan {
+    if custom_template_json.is_some() {
+        TemplateResolutionPlan::UseCustomJson
+    } else if template_id == AUTO_TEMPLATE_ID {
+        TemplateResolutionPlan::AutoSelect
+    } else {
+        TemplateResolutionPlan::UseTemplateId
+    }
+}
+
 fn normalise_summary_language_for_cache(summary_language: Option<&str>) -> Option<String> {
     language_name_from_code(summary_language?.trim()).map(str::to_string)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_summary_result_json(
     final_markdown: &str,
     english_markdown: &str,
     source: SummaryCacheSource,
     output_language: Option<&str>,
+    resolved_template_id: Option<&str>,
+    resolved_template_name: &str,
+    is_generated_template: bool,
+    generated_template_json: Option<&Template>,
 ) -> serde_json::Value {
     serde_json::json!({
         "markdown": strip_title_if_present(final_markdown),
@@ -147,6 +185,10 @@ fn build_summary_result_json(
             source,
             output_language: normalise_summary_language_for_cache(output_language),
         },
+        "resolved_template_id": resolved_template_id,
+        "resolved_template_name": resolved_template_name,
+        "is_generated_template": is_generated_template,
+        "generated_template_json": generated_template_json,
     })
 }
 
@@ -290,7 +332,10 @@ impl SummaryService {
     /// * `model_provider` - LLM provider name (e.g., "ollama", "openai")
     /// * `model_name` - Specific model (e.g., "gpt-4", "llama3.2:latest")
     /// * `custom_prompt` - Optional user-provided context
-    /// * `template_id` - Template identifier (e.g., "daily_standup", "standard_meeting")
+    /// * `template_id` - Template identifier (e.g., "daily_standup", "standard_meeting"),
+    ///   or `"auto"` to have the LLM pick/design one via `templates::select_template`
+    /// * `custom_template_json` - When set, takes precedence over `template_id`: reuses
+    ///   this caller-supplied template JSON verbatim instead of resolving one
     pub async fn process_transcript_background<R: tauri::Runtime>(
         _app: AppHandle<R>,
         pool: SqlitePool,
@@ -300,6 +345,7 @@ impl SummaryService {
         model_name: String,
         custom_prompt: String,
         template_id: String,
+        custom_template_json: Option<String>,
         summary_language: Option<String>,
     ) {
         let start_time = Instant::now();
@@ -452,14 +498,61 @@ impl SummaryService {
             info!("📝 Detected transcript summary language: {}", code);
         }
 
-        let template = match templates::get_template(&template_id) {
-            Ok(template) => template,
-            Err(e) => {
-                let err_msg = format!("Failed to load template '{}': {}", template_id, e);
-                Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
-                return;
+        let client = reqwest::Client::new();
+
+        let template_choice = match plan_template_resolution(custom_template_json.as_deref(), &template_id) {
+            TemplateResolutionPlan::UseCustomJson => {
+                // `custom_template_json` is `Some` per `plan_template_resolution`'s contract.
+                let json = custom_template_json.as_deref().unwrap_or_default();
+                match templates::validate_and_parse_template(json) {
+                    Ok(template) => templates::TemplateChoice {
+                        template,
+                        template_id: None,
+                        is_generated: true,
+                    },
+                    Err(e) => {
+                        let err_msg = format!("Failed to parse custom template JSON: {}", e);
+                        Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
+                        return;
+                    }
+                }
             }
+            TemplateResolutionPlan::AutoSelect => {
+                let candidates: Vec<TemplateInfo> = templates::list_templates()
+                    .into_iter()
+                    .map(|(id, name, description)| TemplateInfo { id, name, description })
+                    .collect();
+                let selection_ctx = templates::TemplateSelectionContext {
+                    client: &client,
+                    provider: &provider,
+                    model_name: &model_name,
+                    api_key: &final_api_key,
+                    ollama_endpoint: ollama_endpoint.as_deref(),
+                    custom_openai_endpoint: custom_openai_endpoint.as_deref(),
+                    app_data_dir: app_data_dir.as_ref(),
+                    cancellation_token: Some(&cancellation_token),
+                };
+                templates::select_template(selection_ctx, &text, candidates).await
+            }
+            TemplateResolutionPlan::UseTemplateId => match templates::get_template(&template_id) {
+                Ok(template) => templates::TemplateChoice {
+                    template,
+                    template_id: Some(template_id.clone()),
+                    is_generated: false,
+                },
+                Err(e) => {
+                    let err_msg = format!("Failed to load template '{}': {}", template_id, e);
+                    Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
+                    return;
+                }
+            },
         };
+
+        let template = template_choice.template;
+        let resolved_template_id = template_choice.template_id;
+        let is_generated_template = template_choice.is_generated;
+        let resolved_template_name = template.name.clone();
+        let generated_template_for_json = is_generated_template.then(|| template.clone());
         let template_fingerprint = template_cache_fingerprint(&template);
 
         let cache_source = build_summary_cache_source(
@@ -504,7 +597,6 @@ impl SummaryService {
             }),
         };
 
-        let client = reqwest::Client::new();
         let result = generate_meeting_summary(
             &client,
             &provider,
@@ -559,6 +651,10 @@ impl SummaryService {
                     &english_markdown,
                     cache_source,
                     summary_language.as_deref(),
+                    resolved_template_id.as_deref(),
+                    &resolved_template_name,
+                    is_generated_template,
+                    generated_template_for_json.as_ref(),
                 );
 
                 // Update database with completed status
@@ -702,6 +798,71 @@ mod tests {
         );
     }
 
+    // ---- plan_template_resolution ----
+
+    #[test]
+    fn plan_template_resolution_custom_json_takes_precedence_over_auto() {
+        assert_eq!(
+            plan_template_resolution(Some(r#"{"name":"x"}"#), AUTO_TEMPLATE_ID),
+            TemplateResolutionPlan::UseCustomJson
+        );
+    }
+
+    #[test]
+    fn plan_template_resolution_custom_json_takes_precedence_over_concrete_id() {
+        assert_eq!(
+            plan_template_resolution(Some(r#"{"name":"x"}"#), "daily_standup"),
+            TemplateResolutionPlan::UseCustomJson
+        );
+    }
+
+    #[test]
+    fn plan_template_resolution_empty_custom_json_string_still_takes_precedence() {
+        // `Some("")` is still `Some` - the plan doesn't validate content, just
+        // decides which branch owns validation.
+        assert_eq!(
+            plan_template_resolution(Some(""), "daily_standup"),
+            TemplateResolutionPlan::UseCustomJson
+        );
+    }
+
+    #[test]
+    fn plan_template_resolution_no_custom_json_and_auto_id_selects_auto() {
+        assert_eq!(
+            plan_template_resolution(None, AUTO_TEMPLATE_ID),
+            TemplateResolutionPlan::AutoSelect
+        );
+    }
+
+    #[test]
+    fn plan_template_resolution_no_custom_json_and_concrete_id_uses_id() {
+        assert_eq!(
+            plan_template_resolution(None, "daily_standup"),
+            TemplateResolutionPlan::UseTemplateId
+        );
+    }
+
+    #[test]
+    fn plan_template_resolution_no_custom_json_and_empty_id_uses_id() {
+        // An empty template_id isn't "auto", so it falls through to
+        // UseTemplateId (and will fail downstream in `get_template`, which
+        // already handles unknown ids as an error).
+        assert_eq!(
+            plan_template_resolution(None, ""),
+            TemplateResolutionPlan::UseTemplateId
+        );
+    }
+
+    #[test]
+    fn plan_template_resolution_id_is_case_sensitive_for_auto() {
+        // "Auto" (capitalized) is not the recognized sentinel - must fall
+        // through to UseTemplateId rather than silently auto-selecting.
+        assert_eq!(
+            plan_template_resolution(None, "Auto"),
+            TemplateResolutionPlan::UseTemplateId
+        );
+    }
+
     fn sample_cache_source() -> SummaryCacheSource {
         let template_fingerprint = stable_text_fingerprint("standard template prompt");
         build_summary_cache_source(
@@ -716,6 +877,26 @@ mod tests {
             None,
             None,
             None,
+            None,
+        )
+    }
+
+    /// `build_summary_result_json` with fixed, resolution-irrelevant template
+    /// args, for cache-behavior tests that don't exercise template resolution.
+    fn build_test_result_json(
+        final_markdown: &str,
+        english_markdown: &str,
+        source: SummaryCacheSource,
+        output_language: Option<&str>,
+    ) -> serde_json::Value {
+        build_summary_result_json(
+            final_markdown,
+            english_markdown,
+            source,
+            output_language,
+            Some("standard_meeting"),
+            "Standard Meeting Notes",
+            false,
             None,
         )
     }
@@ -759,7 +940,7 @@ mod tests {
     #[test]
     fn test_matching_source_changed_translation_target_reuses_cache() {
         let source = sample_cache_source();
-        let raw = build_summary_result_json(
+        let raw = build_test_result_json(
             "# Reunion\n## Points\nBonjour",
             "# Meeting\n## Points\nHello",
             source.clone(),
@@ -776,7 +957,7 @@ mod tests {
     #[test]
     fn test_same_language_regeneration_rejects_cache() {
         let source = sample_cache_source();
-        let raw = build_summary_result_json(
+        let raw = build_test_result_json(
             "# Reunion\n## Points\nBonjour",
             "# Meeting\n## Points\nHello",
             source.clone(),
@@ -794,7 +975,7 @@ mod tests {
     fn test_changed_summary_inputs_reject_cache() {
         let source = sample_cache_source();
         let template_fingerprint = source.template_fingerprint.clone();
-        let raw = build_summary_result_json(
+        let raw = build_test_result_json(
             "# Reunion\n## Points\nBonjour",
             "# Meeting\n## Points\nHello",
             source,
@@ -914,7 +1095,7 @@ mod tests {
     #[test]
     fn test_changed_template_content_rejects_cache() {
         let source = sample_cache_source();
-        let raw = build_summary_result_json(
+        let raw = build_test_result_json(
             "# Reunion\n## Points\nBonjour",
             "# Meeting\n## Points\nHello",
             source.clone(),
@@ -936,7 +1117,7 @@ mod tests {
     #[test]
     fn test_changed_token_threshold_rejects_cache() {
         let source = sample_cache_source();
-        let raw = build_summary_result_json(
+        let raw = build_test_result_json(
             "# Reunion\n## Points\nBonjour",
             "# Meeting\n## Points\nHello",
             source.clone(),
@@ -957,7 +1138,7 @@ mod tests {
 
     #[test]
     fn test_result_json_strips_display_markdown_but_keeps_cache_title() {
-        let result = build_summary_result_json(
+        let result = build_test_result_json(
             "# Translated Title\n## Decisions\nDone",
             "# English Title\n## Decisions\nDone",
             sample_cache_source(),

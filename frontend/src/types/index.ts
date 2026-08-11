@@ -76,9 +76,32 @@ export interface BlockNoteBlock {
   children?: BlockNoteBlock[];
 }
 
+// Mirrors the Rust `Template`/`TemplateSection` structs
+// (frontend/src-tauri/src/summary/templates/types.rs) that
+// `generated_template_json` is serialized from.
+export interface SummaryTemplateSection {
+  title: string;
+  instruction: string;
+  format: string;
+  item_format?: string;
+  example_item_format?: string;
+}
+
+export interface SummaryTemplate {
+  name: string;
+  description: string;
+  sections: SummaryTemplateSection[];
+}
+
 export interface SummaryDataResponse {
   markdown?: string;
   summary_json?: BlockNoteBlock[];
+  // Auto-template-selection metadata (see plan_template_resolution/
+  // build_summary_result_json in src-tauri/src/summary/service.rs)
+  resolved_template_id?: string | null;
+  resolved_template_name?: string;
+  is_generated_template?: boolean;
+  generated_template_json?: SummaryTemplate | null;
   // Legacy format fields
   MeetingName?: string;
   _section_order?: string[];
