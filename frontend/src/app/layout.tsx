@@ -5,6 +5,7 @@ import { Instrument_Sans, JetBrains_Mono } from 'next/font/google'
 import Sidebar from '@/components/Sidebar'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
+import { LiveMeetingIndicator } from '@/components/LiveMeetingIndicator'
 import AnalyticsProvider from '@/components/AnalyticsProvider'
 import { Toaster, toast } from 'sonner'
 import "sonner/dist/styles.css"
@@ -259,6 +260,7 @@ export default function RootLayout({
                               ) : (
                                 <div className="flex">
                                   <Sidebar />
+                                  <LiveMeetingIndicator />
                                   <MainContent>{children}</MainContent>
                                 </div>
                               )}
