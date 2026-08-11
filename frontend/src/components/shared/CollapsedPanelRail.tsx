@@ -1,37 +1,49 @@
 'use client';
 
 import { PanelLeftOpen } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 /**
- * A collapsed side panel, reduced to the same narrow glass rail on both the
- * live and meeting-details screens. Keeps the panel's label readable (rotated
- * up the rail) so the column still says what expanding it brings back.
+ * The narrow rail a collapsed side panel shows, on both the live and
+ * meeting-details screens. Rendered as an overlay inside the panel's own
+ * container and crossfaded rather than swapped in: the panel underneath stays
+ * mounted through the collapse so its scroll position (and, on the live
+ * screen, the virtualizer's measurements) survive the round trip.
  */
 export function CollapsedPanelRail({
   label,
   meta,
+  visible,
   onExpand,
   expandTitle,
 }: {
   label: string;
   /** Short secondary line, e.g. a segment count. */
   meta?: string;
+  visible: boolean;
   onExpand: () => void;
   expandTitle: string;
 }) {
   return (
-    <div className="glass-panel flex w-11 shrink-0 flex-col items-center gap-4 overflow-hidden py-3">
+    <div
+      aria-hidden={!visible}
+      className={cn(
+        'absolute inset-0 z-10 flex flex-col items-center gap-4 py-3 transition-opacity duration-200',
+        visible ? 'opacity-100 delay-100' : 'pointer-events-none opacity-0'
+      )}
+    >
       <button
         type="button"
         onClick={onExpand}
         title={expandTitle}
         aria-label={expandTitle}
+        tabIndex={visible ? 0 : -1}
         className="text-muted-foreground transition-colors hover:text-foreground"
       >
         <PanelLeftOpen className="h-4 w-4" />
       </button>
       <div className="flex items-center gap-3 [writing-mode:vertical-rl]">
-        <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-foreground/80">
+        <span className="whitespace-nowrap text-[11px] font-semibold uppercase tracking-[0.14em] text-foreground/80">
           {label}
         </span>
         {meta && <span className="font-mono text-[10px] text-muted-foreground">{meta}</span>}

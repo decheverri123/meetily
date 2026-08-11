@@ -512,6 +512,24 @@ lines you relied on by repeating their timestamp inline in that exact bracketed 
 right after the claim it supports. Cite only timestamps that appear in the transcript, and do \
 not invent or adjust them.";
 
+/// System prompt for the ask panels' suggested-question chips. Shared by the
+/// live and saved variants so both screens suggest in the same voice and,
+/// crucially, the same shape: the frontend splits the reply into chips one
+/// line at a time, so anything other than bare one-per-line questions (a
+/// preamble, numbering, a trailing note) shows up as a junk chip.
+///
+/// Distinct from `LIVE_ACTION_CHIP_QUESTIONS_PROMPT` in
+/// `audio::recording_commands`, which asks the *builtin sidecar* for markdown
+/// bullets to render as prose during an active recording. These chips are
+/// prefill text for the ask composer, come from the Settings-configured LLM
+/// the ask panels themselves use, and must work on saved meetings too.
+const SUGGEST_QUESTIONS_SYSTEM_PROMPT: &str = "You are suggesting questions a user might ask \
+about a meeting, given its transcript and/or summary. Return exactly 3 questions, each a single \
+short sentence under 60 characters, each on its own line. Ground every question in something \
+specific the context actually contains - a decision, an owner, a risk, an open thread - so that \
+it can be answered from that context. Return ONLY the questions: no numbering, no bullets, no \
+quotes, no preamble, no closing remark.";
+
 /// Validates a user-submitted question: non-empty after trimming, and no
 /// longer than `ASK_QUESTION_MAX_CHARS`. Returns the trimmed question on
 /// success. Pure/sync - unit-testable without a DB or network.
@@ -976,6 +994,83 @@ pub async fn ask_about_live_transcript<R: Runtime>(
     let user_prompt = format!("{}\n\nQuestion: {}", context, question);
 
     ask_configured_llm(&app, ASK_LIVE_TRANSCRIPT_SYSTEM_PROMPT, &user_prompt).await
+}
+
+/// Suggests questions worth asking about the meeting currently being
+/// recorded, from the in-progress transcript passed in by the frontend -
+/// the live counterpart of `suggest_meeting_questions`, mirroring the
+/// `ask_about_live_transcript` / `ask_about_meeting` split for the same
+/// reason (no meeting row exists yet mid-recording).
+#[tauri::command]
+pub async fn suggest_live_transcript_questions<R: Runtime>(
+    app: AppHandle<R>,
+    transcript: String,
+) -> Result<String, String> {
+    log_info!(
+        "suggest_live_transcript_questions called (transcript_chars: {})",
+        transcript.chars().count()
+    );
+
+    let context = build_live_transcript_context(&transcript, ASK_LIVE_TRANSCRIPT_CONTEXT_MAX_CHARS)
+        .map_err(|e| {
+            log_warn!("suggest_live_transcript_questions: {}", e);
+            e
+        })?;
+
+    ask_configured_llm(&app, SUGGEST_QUESTIONS_SYSTEM_PROMPT, &context).await
+}
+
+/// Suggests questions worth asking about a saved meeting, from the same
+/// summary+transcript context `ask_about_meeting` answers from - so the
+/// suggestions can only point at things the answering command can actually
+/// answer.
+#[tauri::command]
+pub async fn suggest_meeting_questions<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<String, String> {
+    log_info!("suggest_meeting_questions called for meeting_id: {}", meeting_id);
+
+    let pool = state.db_manager.pool();
+
+    let meeting = match MeetingsRepository::get_meeting_metadata(pool, &meeting_id).await {
+        Ok(Some(model)) => model,
+        Ok(None) => {
+            log_warn!("suggest_meeting_questions: meeting not found: {}", meeting_id);
+            return Err("Meeting not found.".to_string());
+        }
+        Err(e) => {
+            log_error!("suggest_meeting_questions: failed to load meeting {}: {}", meeting_id, e);
+            return Err(format!("Failed to load meeting: {}", e));
+        }
+    };
+
+    let (summary, transcript_result) = tokio::join!(
+        get_meeting_summary_markdown(pool, &meeting_id),
+        MeetingsRepository::get_recent_transcript_text(
+            pool,
+            &meeting_id,
+            ASK_MEETING_CONTEXT_MAX_CHARS as i64,
+        )
+    );
+    let transcript_text = transcript_result.map_err(|e| {
+        log_error!(
+            "suggest_meeting_questions: failed to load transcript for meeting {}: {}",
+            meeting_id,
+            e
+        );
+        format!("Failed to load transcript: {}", e)
+    })?;
+
+    let context = build_meeting_question_context(
+        &meeting.title,
+        summary.as_deref(),
+        &transcript_text,
+        ASK_MEETING_CONTEXT_MAX_CHARS,
+    );
+
+    ask_configured_llm(&app, SUGGEST_QUESTIONS_SYSTEM_PROMPT, &context).await
 }
 
 /// Answers a free-text question that may span multiple meetings, using each

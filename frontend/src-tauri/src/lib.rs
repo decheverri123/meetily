@@ -679,6 +679,8 @@ pub fn run() {
             summary::commands::ask_about_meeting,
             summary::commands::ask_across_meetings,
             summary::commands::ask_about_live_transcript,
+            summary::commands::suggest_live_transcript_questions,
+            summary::commands::suggest_meeting_questions,
             // Template commands
             summary::template_commands::api_list_templates,
             summary::template_commands::api_get_template_details,

@@ -5,6 +5,7 @@ import { ButtonGroup } from '@/components/ui/button-group';
 import { Copy, GlobeIcon, PanelLeftClose } from 'lucide-react';
 import { CollapsedPanelRail } from '@/components/shared/CollapsedPanelRail';
 import { CitedSourcesPill } from '@/components/shared/CitedSourcesPill';
+import { cn } from '@/lib/utils';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
@@ -52,19 +53,19 @@ export function TranscriptPanel({
 
   const segments = useTranscriptSegments();
 
-  if (isCollapsed && onToggleCollapse) {
-    return (
-      <CollapsedPanelRail
-        label="Transcript"
-        meta={`${segments.length}`}
-        onExpand={onToggleCollapse}
-        expandTitle="Show transcript"
-      />
-    );
-  }
+  const collapsed = Boolean(onToggleCollapse) && isCollapsed;
 
   return (
-    <div ref={transcriptContainerRef} className="w-full border-r border-border/10 flex flex-col overflow-y-auto">
+    <div className="relative flex h-full w-full overflow-hidden">
+      {/* min-w keeps the transcript from reflowing to rail width mid-collapse;
+          the container clips it instead, so it slides out rather than squashing. */}
+      <div
+        ref={transcriptContainerRef}
+        className={cn(
+          'flex w-full min-w-[420px] flex-col overflow-y-auto border-r border-border/10 transition-opacity duration-200',
+          collapsed && 'pointer-events-none opacity-0'
+        )}
+      >
       <div className="glass-panel-header">
         <div className="flex flex-col space-y-3">
           <div className="flex  flex-col space-y-2">
@@ -146,6 +147,17 @@ export function TranscriptPanel({
           </div>
         </div>
       </div>
+      </div>
+
+      {onToggleCollapse && (
+        <CollapsedPanelRail
+          label="Transcript"
+          meta={`${segments.length}`}
+          visible={collapsed}
+          onExpand={onToggleCollapse}
+          expandTitle="Show transcript"
+        />
+      )}
     </div>
   );
 }

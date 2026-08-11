@@ -264,10 +264,17 @@ export default function Home() {
           />
         ) : (
           <>
+            {/* Animates flex-basis/grow rather than width: this column is
+                flex-sized, so `width` never resolves to a value that could be
+                interpolated. Both endpoints are lengths, so they tween. */}
             <div
               className={cn(
-                'flex flex-col overflow-hidden',
-                transcriptCollapsed ? 'shrink-0 p-4' : showLiveInsights ? 'w-1/2' : 'flex-1'
+                'flex flex-col overflow-hidden transition-[flex-basis,flex-grow] duration-300 ease-out',
+                transcriptCollapsed
+                  ? 'grow-0 basis-[44px] p-4'
+                  : showLiveInsights
+                    ? 'grow basis-1/2'
+                    : 'grow basis-0'
               )}
             >
               <TranscriptPanel
@@ -282,7 +289,7 @@ export default function Home() {
             </div>
 
             {showLiveInsights && (
-              <div className="flex flex-1 flex-col overflow-hidden">
+              <div className="flex flex-1 basis-1/2 flex-col overflow-hidden">
                 <LiveInsightsPanel {...liveInsights} />
               </div>
             )}
@@ -290,7 +297,12 @@ export default function Home() {
             {/* pb-28 clears the floating transport bar, which is fixed at
                 bottom-12 (48px) and ~56px tall. */}
             {showAskPanel && (
-              <div className={cn('flex p-4 pb-28', transcriptCollapsed && !showLiveInsights ? 'flex-1' : 'shrink-0')}>
+              <div
+                className={cn(
+                  'flex p-4 pb-28 transition-[flex-grow] duration-300 ease-out',
+                  transcriptCollapsed && !showLiveInsights ? 'flex-1' : 'shrink-0 grow-0'
+                )}
+              >
                 <LiveAskPanel
                   fill={transcriptCollapsed && !showLiveInsights}
                   onCitedSegmentsChange={setCitedSegmentIds}

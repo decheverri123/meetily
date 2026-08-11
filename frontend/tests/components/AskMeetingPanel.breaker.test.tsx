@@ -30,7 +30,7 @@ describe('AskMeetingPanel adversarial', () => {
     fireEvent.click(btn);
     fireEvent.click(btn);
 
-    expect(invoke.calls.length).toBe(1);
+    expect(invoke.callsTo('ask_about_meeting').length).toBe(1);
   });
 
   test('non-Error rejection value (plain object) should not surface "[object Object]" to the user', async () => {

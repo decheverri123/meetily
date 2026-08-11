@@ -39,7 +39,7 @@ describe('AskMeetingPanel concurrent requests to different meetings', () => {
     fireEvent.change(panelB.questionInput(), { target: { value: 'What did B decide?' } });
     fireEvent.click(panelB.askButton());
 
-    expect(invoke.calls).toEqual([
+    expect(invoke.callsTo('ask_about_meeting')).toEqual([
       { cmd: 'ask_about_meeting', args: { meetingId: 'meeting-A', question: 'What did A decide?' } },
       { cmd: 'ask_about_meeting', args: { meetingId: 'meeting-B', question: 'What did B decide?' } },
     ]);

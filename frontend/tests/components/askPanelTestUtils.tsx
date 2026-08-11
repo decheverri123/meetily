@@ -25,6 +25,12 @@ export function mockTauriInvoke() {
   }));
   return {
     calls,
+    /**
+     * Calls to one command. The ask panels also invoke a suggested-questions
+     * command on mount, so assertions about asking have to ignore everything
+     * that isn't the ask command under test.
+     */
+    callsTo: (cmd: string) => calls.filter(call => call.cmd === cmd),
     setImpl: (next: InvokeImpl) => { impl = next; },
     reset: () => {
       calls.length = 0;
@@ -101,6 +107,6 @@ export function testEnterKeySubmits(
     fireEvent.change(questionInput(), { target: { value: 'Question?' } });
     fireEvent.keyDown(questionInput(), { key: 'Enter', code: 'Enter' });
 
-    expect(invoke.calls).toEqual([expectedCall]);
+    expect(invoke.callsTo(expectedCall.cmd)).toEqual([expectedCall]);
   });
 }

@@ -3,6 +3,7 @@
 import { useCallback } from 'react';
 import { AskSidebar } from '@/components/shared/AskSidebar';
 import type { TranscriptSegmentData } from '@/types';
+import { useSuggestedQuestions } from '@/hooks/useSuggestedQuestions';
 
 /**
  * Ask sidebar for a saved meeting. Calls the single-shot `ask_about_meeting`
@@ -10,7 +11,8 @@ import type { TranscriptSegmentData } from '@/types';
  * transcript - so unlike the live panel, only the meeting id goes over.
  */
 
-const SUGGESTED_QUESTIONS = [
+// Shown until the meeting's own suggestions come back (or if they never do).
+const FALLBACK_QUESTIONS = [
   'What was decided?',
   'Who owns the follow-ups?',
   'tl;dr',
@@ -37,6 +39,13 @@ export function AskMeetingPanel({
   onFocusSegment,
   onClose,
 }: AskMeetingPanelProps) {
+  const suggestions = useSuggestedQuestions({
+    command: 'suggest_meeting_questions',
+    args: { meetingId },
+    scope: meetingId,
+    fallback: FALLBACK_QUESTIONS,
+  });
+
   const buildArgs = useCallback(
     (question: string) => ({ meetingId, question }),
     [meetingId]
@@ -48,7 +57,7 @@ export function AskMeetingPanel({
       buildArgs={buildArgs}
       segments={segments}
       placeholder="Ask a question about this meeting..."
-      suggestions={SUGGESTED_QUESTIONS}
+      suggestions={suggestions}
       scopeNote="ANSWERS FROM THIS MEETING ONLY"
       onCitedSegmentsChange={onCitedSegmentsChange}
       onFocusSegment={onFocusSegment}

@@ -35,7 +35,7 @@ describe('AskMeetingPanel', () => {
     fireEvent.change(questionInput(), { target: { value: 'What did we decide?' } });
     fireEvent.click(askButton());
 
-    expect(invoke.calls).toEqual([
+    expect(invoke.callsTo('ask_about_meeting')).toEqual([
       { cmd: 'ask_about_meeting', args: { meetingId: 'meeting-1', question: 'What did we decide?' } },
     ]);
 

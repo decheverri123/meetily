@@ -7,6 +7,7 @@ import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { PanelLeftClose } from 'lucide-react';
 import { CollapsedPanelRail } from '@/components/shared/CollapsedPanelRail';
 import { CitedSourcesPill } from '@/components/shared/CitedSourcesPill';
+import { cn } from '@/lib/utils';
 import { useMemo } from 'react';
 
 interface TranscriptPanelProps {
@@ -84,21 +85,24 @@ export function TranscriptPanel({
     ? (totalCount ?? convertedSegments.length)
     : (transcripts?.length || 0);
 
-  if (isCollapsed && onToggleCollapse) {
-    return (
-      <div className="hidden md:flex">
-        <CollapsedPanelRail
-          label="Transcript"
-          meta={`${segmentCount}`}
-          onExpand={onToggleCollapse}
-          expandTitle="Show transcript"
-        />
-      </div>
-    );
-  }
+  const collapsible = Boolean(onToggleCollapse);
+  const collapsed = collapsible && isCollapsed;
 
   return (
-    <div className="hidden md:flex w-80 lg:w-[380px] min-w-0 flex-col relative shrink-0 glass-panel overflow-hidden">
+    <div
+      className={cn(
+        'hidden md:flex relative shrink-0 flex-col overflow-hidden glass-panel transition-[width] duration-300 ease-out',
+        collapsed ? 'w-11' : 'w-80 lg:w-[380px]'
+      )}
+    >
+      {/* Holds its expanded width while the container clips it, so the panel
+          slides out of view instead of reflowing down to rail width. */}
+      <div
+        className={cn(
+          'flex h-full w-80 lg:w-[380px] shrink-0 flex-col transition-opacity duration-200',
+          collapsed && 'pointer-events-none opacity-0'
+        )}
+      >
       <div className="flex items-center gap-3 p-4 border-b border-border/10">
         {onToggleCollapse && (
           <button
@@ -165,6 +169,17 @@ export function TranscriptPanel({
             />
           </div>
         </div>
+      )}
+      </div>
+
+      {collapsible && onToggleCollapse && (
+        <CollapsedPanelRail
+          label="Transcript"
+          meta={`${segmentCount}`}
+          visible={collapsed}
+          onExpand={onToggleCollapse}
+          expandTitle="Show transcript"
+        />
       )}
     </div>
   );
