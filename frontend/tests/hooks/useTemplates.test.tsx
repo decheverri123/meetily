@@ -87,4 +87,49 @@ describe('useTemplates', () => {
     expect(result.current.selectedTemplate).toBe(AUTO_TEMPLATE_ID);
     expect(result.current.isGeneratedTemplate).toBe(false);
   });
+
+  test('applyResolvedTemplate selects the matched existing template, not just generated ones', async () => {
+    const { result } = await renderTemplates();
+
+    act(() => {
+      result.current.applyResolvedTemplate({
+        resolved_template_id: 'daily_standup',
+        resolved_template_name: 'Daily Standup',
+        is_generated_template: false,
+        generated_template_json: null,
+      } as any);
+    });
+
+    expect(result.current.selectedTemplate).toBe('daily_standup');
+    expect(result.current.isGeneratedTemplate).toBe(false);
+    expect(result.current.generatedTemplate).toBeNull();
+  });
+
+  test('resets selection and generated template when the meeting id changes', async () => {
+    invoke.setImpl(async () => [] as any);
+    const { result, rerender } = renderHook(
+      ({ meetingId }) => useTemplates(meetingId),
+      { initialProps: { meetingId: 'meeting-a' } }
+    );
+    await waitFor(() => expect(result.current.availableTemplates.length).toBeGreaterThan(0));
+
+    act(() => {
+      result.current.applyResolvedTemplate({
+        resolved_template_name: 'Sprint Retro',
+        is_generated_template: true,
+        generated_template_json: {
+          name: 'Sprint Retro',
+          description: 'x',
+          sections: [{ title: 'Wins', instruction: 'x', format: 'list' }],
+        },
+      } as any);
+    });
+    expect(result.current.selectedTemplate).toBe(GENERATED_TEMPLATE_ID);
+
+    rerender({ meetingId: 'meeting-b' });
+
+    expect(result.current.selectedTemplate).toBe(AUTO_TEMPLATE_ID);
+    expect(result.current.generatedTemplate).toBeNull();
+    expect(result.current.availableTemplates.some(t => t.id === GENERATED_TEMPLATE_ID)).toBe(false);
+  });
 });

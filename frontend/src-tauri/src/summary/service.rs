@@ -7,7 +7,7 @@ use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
     extract_meeting_name_from_markdown, generate_meeting_summary, language_name_from_code,
 };
-use crate::summary::template_commands::TemplateInfo;
+use crate::summary::template_commands;
 use crate::summary::templates::{self, Template};
 use crate::ollama::metadata::ModelMetadataCache;
 use serde::{Deserialize, Serialize};
@@ -518,10 +518,7 @@ impl SummaryService {
                 }
             }
             TemplateResolutionPlan::AutoSelect => {
-                let candidates: Vec<TemplateInfo> = templates::list_templates()
-                    .into_iter()
-                    .map(|(id, name, description)| TemplateInfo { id, name, description })
-                    .collect();
+                let candidates = template_commands::list_template_infos();
                 let selection_ctx = templates::TemplateSelectionContext {
                     client: &client,
                     provider: &provider,

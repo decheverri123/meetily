@@ -197,27 +197,8 @@ fn parse_llm_response(raw: &str) -> Result<ParsedChoice, String> {
     Err("LLM response JSON had neither a 'match' nor a 'generate' key".to_string())
 }
 
-/// Strips a single leading/trailing markdown code fence (```` ``` ```` or
-/// ```` ```json ````) from `raw`, if present. Returns the trimmed content
-/// unchanged if it isn't fenced.
 fn strip_code_fences(raw: &str) -> String {
-    let trimmed = raw.trim();
-
-    let Some(after_open) = trimmed.strip_prefix("```") else {
-        return trimmed.to_string();
-    };
-
-    // Skip an optional language identifier (e.g. "json") up to the first
-    // newline.
-    let body = match after_open.find('\n') {
-        Some(idx) => &after_open[idx + 1..],
-        None => after_open,
-    };
-
-    body.strip_suffix("```")
-        .unwrap_or(body)
-        .trim()
-        .to_string()
+    crate::summary::processor::strip_code_fence(raw)
 }
 
 /// Builds a bounded transcript excerpt (prefix + suffix) for the

@@ -13,14 +13,11 @@ export interface TemplateOption {
   description: string;
 }
 
-export function useTemplates() {
+export function useTemplates(meetingId?: string) {
   const [fetchedTemplates, setFetchedTemplates] = useState<TemplateOption[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<string>(AUTO_TEMPLATE_ID);
-
-  const [resolvedTemplateId, setResolvedTemplateId] = useState<string | null>(null);
-  const [resolvedTemplateName, setResolvedTemplateName] = useState<string | null>(null);
-  const [isGeneratedTemplate, setIsGeneratedTemplate] = useState(false);
   const [generatedTemplate, setGeneratedTemplate] = useState<SummaryTemplate | null>(null);
+  const isGeneratedTemplate = generatedTemplate !== null;
 
   // Fetch available templates on mount
   useEffect(() => {
@@ -36,13 +33,24 @@ export function useTemplates() {
     fetchTemplates();
   }, []);
 
+  // PageContent persists across meeting navigation (meetingId changes via a
+  // search param, no remount), so template selection must be reset explicitly
+  // on meeting switch rather than only updated when new resolution data
+  // arrives — otherwise a generated template from meeting A leaks into
+  // meeting B's dropdown/regenerate state. Mirrors the resync-on-prop-change
+  // pattern useMeetingData.ts uses for its own per-meeting state.
+  useEffect(() => {
+    setSelectedTemplate(AUTO_TEMPLATE_ID);
+    setGeneratedTemplate(null);
+  }, [meetingId]);
+
   // Handle template selection
   const handleTemplateSelection = useCallback((templateId: string, templateName: string) => {
     setSelectedTemplate(templateId);
     if (templateId !== GENERATED_TEMPLATE_ID) {
       // Picking anything else (including 'auto') retires the one-use
       // generated-template entry until the next resolution regenerates one.
-      setIsGeneratedTemplate(false);
+      setGeneratedTemplate(null);
     }
     toast.success('Template selected', {
       description: `Using "${templateName}" template for summary generation`,
@@ -59,15 +67,17 @@ export function useTemplates() {
       return;
     }
 
-    setResolvedTemplateId(data.resolved_template_id ?? null);
-    setResolvedTemplateName(data.resolved_template_name);
-
     if (data.is_generated_template && data.generated_template_json) {
       setGeneratedTemplate(data.generated_template_json);
-      setIsGeneratedTemplate(true);
       setSelectedTemplate(GENERATED_TEMPLATE_ID);
     } else {
-      setIsGeneratedTemplate(false);
+      setGeneratedTemplate(null);
+      if (data.resolved_template_id) {
+        // Auto-select matched an existing template rather than generating
+        // one — reflect that choice in the dropdown too, not just the
+        // generated-template case.
+        setSelectedTemplate(data.resolved_template_id);
+      }
     }
   }, []);
 
@@ -80,23 +90,21 @@ export function useTemplates() {
       },
     ];
 
-    if (isGeneratedTemplate && resolvedTemplateName) {
+    if (generatedTemplate) {
       synthetic.push({
         id: GENERATED_TEMPLATE_ID,
-        name: resolvedTemplateName,
+        name: generatedTemplate.name,
         description: 'Generated for this meeting',
       });
     }
 
     return [...synthetic, ...fetchedTemplates];
-  }, [fetchedTemplates, isGeneratedTemplate, resolvedTemplateName]);
+  }, [fetchedTemplates, generatedTemplate]);
 
   return {
     availableTemplates,
     selectedTemplate,
     handleTemplateSelection,
-    resolvedTemplateId,
-    resolvedTemplateName,
     isGeneratedTemplate,
     generatedTemplate,
     applyResolvedTemplate,
