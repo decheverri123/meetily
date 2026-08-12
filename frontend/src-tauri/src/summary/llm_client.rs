@@ -25,8 +25,6 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub num_ctx: Option<u32>,
 }
 
 // Generic structure for OpenAI-compatible API chat responses
@@ -43,6 +41,34 @@ pub struct Choice {
 #[derive(Deserialize, Debug)]
 pub struct MessageContent {
     pub content: String,
+}
+
+// Ollama-native request/response structures for the `/api/chat` endpoint.
+//
+// Ollama's OpenAI-compatible shim (`/v1/chat/completions`) decodes the
+// request body into a fixed Go struct with no `options`/`num_ctx` field at
+// all, so a context-window override can never reach it - the field is
+// silently dropped by Go's JSON unmarshaling regardless of where in the body
+// it's placed. Only Ollama's native endpoints honor `"options": {"num_ctx": N}`,
+// so the Ollama branch of `generate_summary` targets `/api/chat` instead of
+// the shared OpenAI-compat path used by every other provider.
+#[derive(Debug, Serialize)]
+pub struct OllamaOptions {
+    pub num_ctx: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OllamaChatRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<OllamaOptions>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct OllamaChatResponse {
+    pub message: MessageContent,
 }
 
 // Claude-specific request structure
@@ -175,8 +201,11 @@ pub async fn generate_summary(
             let host = ollama_endpoint
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
+            // Ollama's native endpoint, not the OpenAI-compat shim: only this
+            // path honors a nested `"options": {"num_ctx": N}` context-window
+            // override (see the `OllamaChatRequest` doc comment above).
             (
-                format!("{}/v1/chat/completions", host),
+                format!("{}/api/chat", host),
                 header::HeaderMap::new(),
             )
         }
@@ -236,14 +265,39 @@ pub async fn generate_summary(
     );
 
     // Build request body based on provider
-    let request_body = if provider != &LLMProvider::Claude {
+    let request_body = if provider == &LLMProvider::Claude {
+        serde_json::json!(ClaudeRequest {
+            system: system_prompt.to_string(),
+            model: model_name.to_string(),
+            max_tokens: 2048,
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: user_prompt.to_string(),
+            }]
+        })
+    } else if provider == &LLMProvider::Ollama {
+        serde_json::json!(OllamaChatRequest {
+            model: model_name.to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: user_prompt.to_string(),
+                }
+            ],
+            stream: false,
+            options: num_ctx.map(|n| OllamaOptions { num_ctx: n }),
+        })
+    } else {
         // For CustomOpenAI, apply optional parameters if provided
         let (max_tokens_val, temperature_val, top_p_val) = if provider == &LLMProvider::CustomOpenAI {
             (max_tokens, temperature, top_p)
         } else {
             (None, None, None)
         };
-        let num_ctx_val = if provider == &LLMProvider::Ollama { num_ctx } else { None };
 
         serde_json::json!(ChatRequest {
             model: model_name.to_string(),
@@ -260,17 +314,6 @@ pub async fn generate_summary(
             max_tokens: max_tokens_val,
             temperature: temperature_val,
             top_p: top_p_val,
-            num_ctx: num_ctx_val,
-        })
-    } else {
-        serde_json::json!(ClaudeRequest {
-            system: system_prompt.to_string(),
-            model: model_name.to_string(),
-            max_tokens: 2048,
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: user_prompt.to_string(),
-            }]
         })
     };
 
@@ -334,6 +377,15 @@ pub async fn generate_summary(
             .text
             .trim();
         Ok(content.to_string())
+    } else if provider == &LLMProvider::Ollama {
+        let chat_response = response
+            .json::<OllamaChatResponse>()
+            .await
+            .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
+
+        info!("🐞 LLM Response received from {}", provider_name(provider));
+
+        Ok(chat_response.message.content.trim().to_string())
     } else {
         let chat_response = response
             .json::<ChatResponse>()
@@ -366,5 +418,139 @@ pub(crate) fn provider_name(provider: &LLMProvider) -> &str {
         LLMProvider::BuiltInAI => "Built-in AI",
         LLMProvider::OpenRouter => "OpenRouter",
         LLMProvider::CustomOpenAI => "Custom OpenAI",
+    }
+}
+
+#[cfg(test)]
+mod num_ctx_wire_format_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Spins up a minimal local mock HTTP server (no external network - just
+    /// a loopback TCP listener) and captures the raw request `generate_summary`
+    /// sends for a given provider.
+    fn capture_request(
+        response_body: &'static str,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let addr = listener.local_addr().unwrap();
+        let endpoint = format!("http://{}", addr);
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request_text = String::from_utf8_lossy(&buf[..n]).to_string();
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+            request_text
+        });
+
+        (endpoint, handle)
+    }
+
+    /// Ollama's OpenAI-compat shim (`/v1/chat/completions`) decodes into a
+    /// fixed Go struct with no `options`/`num_ctx` field at all (confirmed
+    /// against `openai/openai.go`'s `ChatCompletionRequest` and its
+    /// `fromChatRequest` translation, whose `options` map is built from a
+    /// fixed allowlist that excludes `num_ctx`), so no placement of the field
+    /// in that request body can ever reach the model. A context-window
+    /// override only takes effect on Ollama's native `/api/chat` endpoint,
+    /// nested as `"options": {"num_ctx": N}`. This test proves `generate_summary`
+    /// now targets that native endpoint with that wire shape for Ollama.
+    #[tokio::test]
+    async fn generate_summary_ollama_sends_num_ctx_nested_in_options_on_native_api_chat() {
+        let (endpoint, handle) =
+            capture_request(r#"{"model":"llama3","message":{"role":"assistant","content":"ok"},"done":true}"#);
+
+        let client = reqwest::Client::new();
+        let result = generate_summary(
+            &client,
+            &LLMProvider::Ollama,
+            "llama3",
+            "",
+            "system",
+            "user",
+            Some(&endpoint),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(32768), // the resolved model's real context window
+        )
+        .await;
+
+        let request_text = handle.join().expect("mock server thread panicked");
+
+        assert!(result.is_ok(), "generate_summary should have succeeded against the mock server: {:?}", result);
+
+        // (1) Ollama's native chat endpoint is hit, not the OpenAI-compat shim.
+        assert!(
+            request_text.starts_with("POST /api/chat"),
+            "expected Ollama's native /api/chat path, got request line: {:?}",
+            request_text.lines().next()
+        );
+
+        // (2) num_ctx is nested under "options" - the only shape Ollama's
+        // native endpoint reads a context-window override from.
+        assert!(
+            request_text.contains("\"options\":{\"num_ctx\":32768}"),
+            "expected num_ctx nested under an \"options\" object, got: {}",
+            request_text
+        );
+    }
+
+    /// Regression coverage: other OpenAI-compatible providers must be
+    /// unaffected by the Ollama-specific endpoint switch above and keep
+    /// hitting the shared `/v1/chat/completions`-family path with no
+    /// `num_ctx`/`options` field at all (the shared `ChatRequest` no longer
+    /// has a `num_ctx` field to serialize).
+    #[tokio::test]
+    async fn generate_summary_openai_still_uses_compat_endpoint_without_num_ctx() {
+        let (endpoint, handle) =
+            capture_request(r#"{"choices":[{"message":{"content":"ok"}}]}"#);
+
+        let client = reqwest::Client::new();
+        let result = generate_summary(
+            &client,
+            &LLMProvider::LmStudio,
+            "llama3",
+            "",
+            "system",
+            "user",
+            Some(&endpoint),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(32768),
+        )
+        .await;
+
+        let request_text = handle.join().expect("mock server thread panicked");
+
+        assert!(result.is_ok(), "generate_summary should have succeeded against the mock server: {:?}", result);
+        assert!(
+            request_text.starts_with("POST /chat/completions"),
+            "expected LmStudio's OpenAI-compatible /chat/completions path (unchanged by the \
+             Ollama-specific fix), got request line: {:?}",
+            request_text.lines().next()
+        );
+        assert!(
+            !request_text.contains("num_ctx") && !request_text.contains("\"options\""),
+            "num_ctx must not leak into non-Ollama providers' request bodies, got: {}",
+            request_text
+        );
     }
 }

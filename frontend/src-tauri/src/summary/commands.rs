@@ -1699,6 +1699,119 @@ mod ask_ai_tests {
     }
 
     #[test]
+    fn order_meetings_by_relevance_scores_summary_only_not_title() {
+        // Meeting "TitleHasPricing" mentions "pricing" only in its TITLE
+        // (meeting.0), not its summary (meeting.2). Meeting "Other" mentions
+        // "pricing" only in its SUMMARY. If scoring accidentally looked at
+        // the title (e.g. a tuple-destructuring slip), "TitleHasPricing"
+        // would incorrectly outrank "Other".
+        let meetings = vec![
+            (
+                "TitleHasPricing".to_string(),
+                "2024-03-01".to_string(),
+                Some("We discussed lunch orders and parking.".to_string()),
+            ),
+            (
+                "Other".to_string(),
+                "2024-01-01".to_string(),
+                Some("We finalized the pricing model for Q3.".to_string()),
+            ),
+        ];
+        let ordered = order_meetings_by_relevance(meetings, "What did we decide about pricing?");
+        assert_eq!(
+            ordered[0].0, "Other",
+            "expected the meeting whose SUMMARY mentions 'pricing' to rank first, got order: {:?}",
+            ordered.iter().map(|m| &m.0).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn order_meetings_by_relevance_all_short_words_falls_back_to_recency() {
+        // Every word in "is it ok" is under the 3-char minimum, so terms
+        // ends up empty and every meeting should score 0, preserving input
+        // (recency) order - regardless of what's in the summaries.
+        let meetings = vec![
+            ("Meeting A".to_string(), "2024-03-01".to_string(), Some("ok".to_string())),
+            ("Meeting B".to_string(), "2024-02-01".to_string(), Some("is it fine".to_string())),
+            ("Meeting C".to_string(), "2024-01-01".to_string(), Some("nothing relevant here".to_string())),
+        ];
+        let original = meetings.clone();
+        let ordered = order_meetings_by_relevance(meetings, "is it ok");
+        assert_eq!(ordered, original);
+    }
+
+    #[test]
+    fn order_meetings_by_relevance_punctuation_and_emoji_only_question_no_panic() {
+        let meetings = vec![
+            ("Meeting A".to_string(), "2024-03-01".to_string(), Some("Alpha summary.".to_string())),
+            ("Meeting B".to_string(), "2024-02-01".to_string(), Some("Beta summary.".to_string())),
+        ];
+        let original = meetings.clone();
+        let ordered = order_meetings_by_relevance(meetings, "??? !!! \u{1F389}\u{1F389}\u{1F389} --- ...");
+        assert_eq!(ordered, original, "punctuation/emoji-only question should degrade to recency order");
+    }
+
+    #[test]
+    fn order_meetings_by_relevance_stable_sort_preserves_recency_among_tied_nonzero_scores() {
+        // A, B, D all match "pricing" (score 1 each); C matches nothing
+        // (score 0). Original (recency) order is A, B, C, D. A correct
+        // stable sort must keep A, B, D in their original relative order
+        // among the tied top-scorers, with D's original position (after C)
+        // not accidentally promoting it ahead of A/B or reordering within
+        // the tied group.
+        let meetings = vec![
+            ("A".to_string(), "2024-04-01".to_string(), Some("pricing discussion one".to_string())),
+            ("B".to_string(), "2024-03-01".to_string(), Some("pricing discussion two".to_string())),
+            ("C".to_string(), "2024-02-01".to_string(), Some("totally unrelated topic".to_string())),
+            ("D".to_string(), "2024-01-01".to_string(), Some("pricing discussion three".to_string())),
+        ];
+        let ordered = order_meetings_by_relevance(meetings, "What about pricing?");
+        let order: Vec<&str> = ordered.iter().map(|m| m.0.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["A", "B", "D", "C"],
+            "expected tied top-scorers to retain original recency order (A,B,D) with C (score 0) last, got {:?}",
+            order
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_ask_context_budget_ollama_metadata_fetch_failure_uses_much_smaller_budget_than_outer_fallback(
+    ) {
+        // Simulates a live Ollama endpoint that's unreachable (connection
+        // refused) - this is the METADATA_CACHE.get_or_fetch failure branch
+        // inside resolve_ask_context_budget, distinct from resolve_ask_llm_plan
+        // failing outright. Confirms it does NOT fall back to the flat
+        // ASK_ACROSS_MEETINGS_CONTEXT_MAX_CHARS (100_000 chars) the way a
+        // resolve_ask_llm_plan failure does in ask_across_meetings - instead
+        // it silently collapses to a much smaller, hardcoded 4000-token
+        // (~11_429-char) budget.
+        let plan = AskLlmPlan::Provider(LiveLlmProviderInvocation {
+            provider: LLMProvider::Ollama,
+            model_name: "llama3".to_string(),
+            api_key: String::new(),
+            ollama_endpoint: Some("http://127.0.0.1:1".to_string()), // port 1: connection refused
+            custom_openai_endpoint: None,
+            custom_openai_max_tokens: None,
+            custom_openai_temperature: None,
+            custom_openai_top_p: None,
+        });
+        let budget = resolve_ask_context_budget(&plan).await;
+        assert_eq!(budget.raw_context_tokens, None);
+        assert_eq!(budget.budget_tokens, 4000);
+
+        let char_budget = ask_across_meetings_char_budget(budget.budget_tokens);
+        assert!(
+            char_budget < ASK_ACROSS_MEETINGS_CONTEXT_MAX_CHARS,
+            "expected a transient Ollama metadata-fetch failure to collapse the ask_across_meetings \
+             context budget to {} chars, far below the {}-char fallback used when the whole LLM plan \
+             fails to resolve - these are two different failure surfaces with very different budgets",
+            char_budget,
+            ASK_ACROSS_MEETINGS_CONTEXT_MAX_CHARS
+        );
+    }
+
+    #[test]
     fn take_last_chars_returns_whole_string_when_within_budget() {
         assert_eq!(take_last_chars("hello", 10), "hello");
     }
