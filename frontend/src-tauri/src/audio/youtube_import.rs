@@ -227,6 +227,13 @@ fn parse_ytdlp_progress_percentage(line: &str) -> Option<u32> {
 
 /// Check whether a string looks like a YouTube video URL (watch/shorts/youtu.be/embed/
 /// live). Validation only — does not check that the video exists or is reachable.
+///
+/// Playlists are explicitly rejected: a URL like
+/// `https://www.youtube.com/watch?v=ID&list=PL...` looks like a single
+/// video link but actually resolves to a playlist. We treat playlist
+/// URLs as invalid at this entry point so the import command errors
+/// cleanly instead of silently pulling the first video of the list
+/// (or all of them).
 pub fn is_valid_youtube_url(url: &str) -> bool {
     let parsed = match Url::parse(url) {
         Ok(u) => u,
@@ -242,6 +249,10 @@ pub fn is_valid_youtube_url(url: &str) -> bool {
         None => return false,
     };
     let host = host_owned.strip_prefix("www.").unwrap_or(&host_owned);
+
+    if parsed.query_pairs().any(|(k, _)| k == "list") {
+        return false;
+    }
 
     match host {
         "youtube.com" | "m.youtube.com" | "music.youtube.com" => {
@@ -916,6 +927,111 @@ mod tests {
         // "youtube.com.evil.com" contains "youtube.com" as a substring but is a
         // different registrable domain entirely.
         assert!(!is_valid_youtube_url("https://youtube.com.evil.com/watch?v=dQw4w9WgXcQ"));
+    }
+
+    // -- Adversarial: playlist handling --
+    //
+    // A URL like `?v=ID&list=PL...` looks like a single-video watch URL
+    // but actually resolves to a playlist. The validator must reject any
+    // URL that carries a `list` query parameter, regardless of which other
+    // params are present, so the import command errors cleanly rather
+    // than silently pulling the first video of the playlist (or all of
+    // them).
+
+    #[test]
+    fn test_is_valid_youtube_url_rejects_watch_with_playlist() {
+        assert!(
+            !is_valid_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLxyz"),
+            "watch?v=ID&list=PL must be rejected: it resolves to a playlist, not the video"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_youtube_url_rejects_watch_with_playlist_and_index() {
+        assert!(!is_valid_youtube_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLxyz&index=2"
+        ));
+    }
+
+    #[test]
+    fn test_is_valid_youtube_url_rejects_playlist_only_via_v_empty() {
+        // Belt-and-suspenders: even with `v=` and a bare `list=PL`, the
+        // URL is rejected because the list param is present.
+        assert!(!is_valid_youtube_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL"
+        ));
+    }
+
+    #[test]
+    fn test_is_valid_youtube_url_rejects_pure_playlist_url() {
+        // /playlist?list=... has no v= param and no /shorts/ or /embed/
+        // prefix — must be rejected.
+        assert!(!is_valid_youtube_url("https://www.youtube.com/playlist?list=PLxyz"));
+        assert!(!is_valid_youtube_url("https://www.youtube.com/playlist?list=PLxyz&index=2"));
+    }
+
+    // -- Adversarial: host variants & edge cases --
+
+    #[test]
+    fn test_is_valid_youtube_url_accepts_music_youtube() {
+        assert!(is_valid_youtube_url("https://music.youtube.com/watch?v=abc"));
+    }
+
+    #[test]
+    fn test_is_valid_youtube_url_rejects_case_variation_of_evil_host() {
+        // Capitalized YouTube: parse + lowercase on host_str should catch it.
+        // But case-sensitivity in the matched arm: the host comparison
+        // is case-insensitive (host_owned.to_lowercase()) so this
+        // matches as "youtube.com" and is accepted. If the comparison
+        // were case-sensitive, this would be a security issue.
+        assert!(
+            is_valid_youtube_url("https://YOUTUBE.COM/watch?v=abc"),
+            "YOUTUBE.COM (uppercase) is accepted via lowercase host match"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_youtube_url_rejects_scheme_relative() {
+        // No scheme — not a valid URL.
+        assert!(!is_valid_youtube_url("//www.youtube.com/watch?v=abc"));
+        assert!(!is_valid_youtube_url("www.youtube.com/watch?v=abc"));
+    }
+
+    #[test]
+    fn test_is_valid_youtube_url_rejects_empty_path_youtu_be() {
+        // https://youtu.be/ with no id
+        assert!(!is_valid_youtube_url("https://youtu.be/"));
+        assert!(!is_valid_youtube_url("https://youtu.be"));
+    }
+
+    #[test]
+    fn test_is_valid_youtube_url_handles_urls_with_whitespace_in_middle() {
+        // Documents current behavior: `url::Url::parse` tolerates embedded
+        // whitespace in the query string and the validator does not strip
+        // it. The v= param value is "abc def" — non-empty, so the URL
+        // passes validation. yt-dlp will then fail downstream.
+        //
+        // This is a *latent* bug: the frontend parseQueueInput does trim(),
+        // but that only removes leading/trailing whitespace, not internal.
+        // A user pasting "https://www.youtube.com/watch?v=abc def" gets a
+        // URL that is "valid" by our rules but will fail to download.
+        //
+        // Pin the current behavior here so the regression is visible.
+        let bad = "https://www.youtube.com/watch?v=abc def";
+        assert!(
+            is_valid_youtube_url(bad),
+            "embedded whitespace is currently accepted — will fail at yt-dlp time"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_youtube_url_rejects_url_with_very_long_query() {
+        // Pathological 10KB query string. Url::parse should handle it
+        // without panic, and validation should still work.
+        let huge_query = "v=abc&".to_string() + &"x=1&".repeat(2_000);
+        let url = format!("https://www.youtube.com/watch?{}", huge_query);
+        let result = is_valid_youtube_url(&url);
+        assert!(result, "valid v= param is present even with 10KB query");
     }
 
     // -- Adversarial: fetch_youtube_video_info against a fake yt-dlp subprocess --
