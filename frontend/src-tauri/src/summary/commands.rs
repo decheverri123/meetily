@@ -2,10 +2,12 @@ use crate::api::api::{api_get_custom_openai_config, api_get_model_config};
 use crate::audio::recording_commands::{
     resolve_effective_model_name, resolve_live_llm_provider, resolve_provider_invocation,
 };
+use crate::database::models::TokenUsagePurpose;
 use crate::database::repositories::{
     meeting::MeetingsRepository,
     summary::SummaryProcessesRepository, transcript_chunk::TranscriptChunksRepository,
 };
+use crate::database::token_usage_recorder::record_token_usage;
 use crate::state::AppState;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::summary::metadata::{
@@ -816,8 +818,11 @@ async fn get_meeting_summary_markdown(
 /// `log_error!` at each wrapping point below, for diagnosability.
 async fn ask_configured_llm<R: Runtime>(
     app: &AppHandle<R>,
+    state: &tauri::State<'_, AppState>,
     system_prompt: &str,
     user_prompt: &str,
+    meeting_id: Option<&str>,
+    purpose: TokenUsagePurpose,
 ) -> Result<String, String> {
     const GENERIC_LLM_ERROR: &str =
         "Failed to reach the configured LLM provider. Check your provider settings and try again.";
@@ -834,90 +839,102 @@ async fn ask_configured_llm<R: Runtime>(
 
     let client = reqwest::Client::new();
 
-    let result: Result<String, String> = if provider == LLMProvider::BuiltInAI {
-        let app_data_dir = app.path().app_data_dir().map_err(|e| {
-            log_error!("ask_configured_llm: failed to resolve app data directory: {}", e);
-            GENERIC_LLM_ERROR.to_string()
-        })?;
-        let model_name = model_config
-            .as_ref()
-            .map(|c| c.model.as_str())
-            .filter(|m| !m.trim().is_empty())
-            .ok_or_else(|| {
-                log_warn!("ask_configured_llm: no local model configured for BuiltInAI provider");
-                "No local model configured — configure a builtin AI model in Settings → Model \
-                 Settings."
-                    .to_string()
+    let result: Result<crate::summary::llm_client::GenerateSummaryOutput, String> =
+        if provider == LLMProvider::BuiltInAI {
+            let app_data_dir = app.path().app_data_dir().map_err(|e| {
+                log_error!("ask_configured_llm: failed to resolve app data directory: {}", e);
+                GENERIC_LLM_ERROR.to_string()
             })?;
-
-        generate_summary(
-            &client,
-            &provider,
-            model_name,
-            "",
-            system_prompt,
-            user_prompt,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(&app_data_dir),
-            None,
-        )
-        .await
-    } else {
-        let effective_model_name =
-            resolve_effective_model_name(None, model_config.as_ref().map(|c| c.model.as_str()))
+            let model_name = model_config
+                .as_ref()
+                .map(|c| c.model.as_str())
+                .filter(|m| !m.trim().is_empty())
                 .ok_or_else(|| {
-                    log_warn!(
-                        "ask_configured_llm: no model configured for provider {:?}",
-                        provider
-                    );
-                    "No model configured for the selected provider — configure one in \
-                     Settings → Model Settings."
+                    log_warn!("ask_configured_llm: no local model configured for BuiltInAI provider");
+                    "No local model configured — configure a builtin AI model in Settings → Model \
+                     Settings."
                         .to_string()
                 })?;
 
-        let custom_openai_config = if provider == LLMProvider::CustomOpenAI {
-            api_get_custom_openai_config(app.clone(), app.clone().state())
-                .await
-                .ok()
-                .flatten()
+            generate_summary(
+                &client,
+                &provider,
+                model_name,
+                "",
+                system_prompt,
+                user_prompt,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&app_data_dir),
+                None,
+            )
+            .await
         } else {
-            None
+            let effective_model_name =
+                resolve_effective_model_name(None, model_config.as_ref().map(|c| c.model.as_str()))
+                    .ok_or_else(|| {
+                        log_warn!(
+                            "ask_configured_llm: no model configured for provider {:?}",
+                            provider
+                        );
+                        "No model configured for the selected provider — configure one in \
+                         Settings → Model Settings."
+                            .to_string()
+                    })?;
+
+            let custom_openai_config = if provider == LLMProvider::CustomOpenAI {
+                api_get_custom_openai_config(app.clone(), app.clone().state())
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+
+            let invocation = resolve_provider_invocation(
+                &provider,
+                &effective_model_name,
+                model_config.as_ref().and_then(|c| c.api_key.as_deref()),
+                model_config.as_ref().and_then(|c| c.ollama_endpoint.as_deref()),
+                custom_openai_config.as_ref(),
+            )?;
+
+            generate_summary(
+                &client,
+                &invocation.provider,
+                &invocation.model_name,
+                &invocation.api_key,
+                system_prompt,
+                user_prompt,
+                invocation.ollama_endpoint.as_deref(),
+                invocation.custom_openai_endpoint.as_deref(),
+                invocation.custom_openai_max_tokens,
+                invocation.custom_openai_temperature,
+                invocation.custom_openai_top_p,
+                None,
+                None,
+            )
+            .await
         };
 
-        let invocation = resolve_provider_invocation(
-            &provider,
-            &effective_model_name,
-            model_config.as_ref().and_then(|c| c.api_key.as_deref()),
-            model_config.as_ref().and_then(|c| c.ollama_endpoint.as_deref()),
-            custom_openai_config.as_ref(),
-        )?;
-
-        generate_summary(
-            &client,
-            &invocation.provider,
-            &invocation.model_name,
-            &invocation.api_key,
-            system_prompt,
-            user_prompt,
-            invocation.ollama_endpoint.as_deref(),
-            invocation.custom_openai_endpoint.as_deref(),
-            invocation.custom_openai_max_tokens,
-            invocation.custom_openai_temperature,
-            invocation.custom_openai_top_p,
-            None,
-            None,
-        )
-        .await
-    };
-
-    result.map_err(|e| {
+    let output = result.map_err(|e| {
         log_error!("ask_configured_llm: LLM provider call failed: {}", e);
         GENERIC_LLM_ERROR.to_string()
-    })
+    })?;
+
+    if let Some(usage) = output.usage {
+        record_token_usage(
+            state.db_manager.pool().clone(),
+            meeting_id.map(str::to_string),
+            usage,
+            purpose,
+        );
+    }
+
+    Ok(output.summary)
 }
 
 /// Answers a free-text question about a single meeting, using its stored
@@ -989,7 +1006,15 @@ pub async fn ask_about_meeting<R: Runtime>(
 
     let user_prompt = format!("{}\n\nQuestion: {}", context, question);
 
-    ask_configured_llm(&app, ASK_ABOUT_MEETING_SYSTEM_PROMPT, &user_prompt).await
+    ask_configured_llm(
+        &app,
+        &state,
+        ASK_ABOUT_MEETING_SYSTEM_PROMPT,
+        &user_prompt,
+        Some(&meeting_id),
+        TokenUsagePurpose::QaMeeting,
+    )
+    .await
 }
 
 /// Answers a free-text question about the meeting currently being recorded,
@@ -1004,6 +1029,7 @@ pub async fn ask_about_meeting<R: Runtime>(
 #[tauri::command]
 pub async fn ask_about_live_transcript<R: Runtime>(
     app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
     transcript: String,
     question: String,
 ) -> Result<String, String> {
@@ -1022,7 +1048,15 @@ pub async fn ask_about_live_transcript<R: Runtime>(
 
     let user_prompt = format!("{}\n\nQuestion: {}", context, question);
 
-    ask_configured_llm(&app, ASK_LIVE_TRANSCRIPT_SYSTEM_PROMPT, &user_prompt).await
+    ask_configured_llm(
+        &app,
+        &state,
+        ASK_LIVE_TRANSCRIPT_SYSTEM_PROMPT,
+        &user_prompt,
+        None,
+        TokenUsagePurpose::QaLive,
+    )
+    .await
 }
 
 /// Suggests questions worth asking about the meeting currently being
@@ -1033,6 +1067,7 @@ pub async fn ask_about_live_transcript<R: Runtime>(
 #[tauri::command]
 pub async fn suggest_live_transcript_questions<R: Runtime>(
     app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
     transcript: String,
 ) -> Result<String, String> {
     log_info!(
@@ -1046,7 +1081,15 @@ pub async fn suggest_live_transcript_questions<R: Runtime>(
             e
         })?;
 
-    ask_configured_llm(&app, SUGGEST_QUESTIONS_SYSTEM_PROMPT, &context).await
+    ask_configured_llm(
+        &app,
+        &state,
+        SUGGEST_QUESTIONS_SYSTEM_PROMPT,
+        &context,
+        None,
+        TokenUsagePurpose::SuggestQuestions,
+    )
+    .await
 }
 
 /// Suggests questions worth asking about a saved meeting, from the same
@@ -1099,7 +1142,15 @@ pub async fn suggest_meeting_questions<R: Runtime>(
         ASK_MEETING_CONTEXT_MAX_CHARS,
     );
 
-    ask_configured_llm(&app, SUGGEST_QUESTIONS_SYSTEM_PROMPT, &context).await
+    ask_configured_llm(
+        &app,
+        &state,
+        SUGGEST_QUESTIONS_SYSTEM_PROMPT,
+        &context,
+        Some(&meeting_id),
+        TokenUsagePurpose::SuggestQuestions,
+    )
+    .await
 }
 
 /// Answers a free-text question that may span multiple meetings, using each
@@ -1164,7 +1215,15 @@ pub async fn ask_across_meetings<R: Runtime>(
 
     let user_prompt = format!("{}\n\nQuestion: {}", context, question);
 
-    ask_configured_llm(&app, ASK_ACROSS_MEETINGS_SYSTEM_PROMPT, &user_prompt).await
+    ask_configured_llm(
+        &app,
+        &state,
+        ASK_ACROSS_MEETINGS_SYSTEM_PROMPT,
+        &user_prompt,
+        None,
+        TokenUsagePurpose::QaGlobal,
+    )
+    .await
 }
 
 #[cfg(test)]

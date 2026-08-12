@@ -739,6 +739,12 @@ pub fn run() {
             // Database and Models path commands
             database::commands::get_database_directory,
             database::commands::open_database_folder,
+            // Token usage commands
+            database::token_usage_commands::api_record_token_usage,
+            database::token_usage_commands::api_list_token_usage,
+            database::token_usage_commands::api_aggregate_token_usage_by_model,
+            database::token_usage_commands::api_aggregate_token_usage_over_time,
+            database::token_usage_pricing::api_resolve_model_pricing,
             whisper_engine::commands::open_models_folder,
             // Onboarding commands
             onboarding::get_onboarding_status,

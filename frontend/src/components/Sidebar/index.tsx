@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { ChevronDown, ChevronRight, File, Settings, ChevronLeftCircle, ChevronRightCircle, Calendar, StickyNote, Home, Trash2, Mic, Square, Plus, Search, Pencil, NotebookPen, SearchIcon, X, Upload } from 'lucide-react';
+import { ChevronDown, ChevronRight, File, Settings, ChevronLeftCircle, ChevronRightCircle, Calendar, StickyNote, Home, Trash2, Mic, Square, Plus, Search, Pencil, NotebookPen, SearchIcon, X, Upload, BarChart3 } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useSidebar } from './SidebarProvider';
 import type { CurrentMeeting } from '@/components/Sidebar/SidebarProvider';
@@ -470,6 +470,7 @@ const Sidebar: React.FC = () => {
     const isHomePage = pathname === '/';
     const isMeetingPage = pathname?.includes('/meeting-details');
     const isSettingsPage = pathname === '/settings';
+    const isTokenUsagePage = pathname === '/token-usage';
 
     return (
       <TooltipProvider>
@@ -558,6 +559,20 @@ const Sidebar: React.FC = () => {
           </Tooltip>
 
           <div className="flex-1" />
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={() => router.push('/token-usage')}
+                className={collapsedNavTileClass(isTokenUsagePage)}
+              >
+                <BarChart3 className="w-5 h-5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              <p>Token Usage</p>
+            </TooltipContent>
+          </Tooltip>
 
           <Tooltip>
             <TooltipTrigger asChild>
@@ -834,6 +849,14 @@ const Sidebar: React.FC = () => {
                 <span>Import Audio</span>
               </button>
             )}
+
+            <button
+              onClick={() => router.push('/token-usage')}
+              className={`mt-2 ${footerButtonClass} ${pathname === '/token-usage' ? 'bg-primary/10 text-primary' : ''}`}
+            >
+              <BarChart3 className="w-4 h-4" />
+              <span>Token Usage</span>
+            </button>
 
             <button
               onClick={() => router.push('/settings')}

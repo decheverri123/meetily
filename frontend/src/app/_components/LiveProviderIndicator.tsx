@@ -1,7 +1,8 @@
 import { Cloud } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-import { ALWAYS_AVAILABLE_PROVIDERS, providerLabel } from './LiveActionChipModelPicker';
+import { ALWAYS_AVAILABLE_PROVIDERS } from './LiveActionChipModelPicker';
+import { providerLabel } from '@/lib/providerLabels';
 
 interface LiveProviderIndicatorProps {
   /**
