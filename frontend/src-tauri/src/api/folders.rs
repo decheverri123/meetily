@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::{
+    audio::recording_commands::{
+        resolve_effective_model_name, resolve_provider_invocation, LiveLlmProviderInvocation,
+    },
     database::{
         models::FolderModel,
         repositories::{
@@ -59,12 +62,9 @@ pub struct BatchCategorizeResult {
     pub results: Vec<CategorizeResult>,
 }
 
-async fn resolve_llm_config(
+async fn resolve_llm_invocation(
     pool: &sqlx::SqlitePool,
-) -> Result<
-    (LLMProvider, String, String, Option<String>, Option<String>, Option<u32>, Option<f32>, Option<f32>),
-    String,
-> {
+) -> Result<LiveLlmProviderInvocation, String> {
     let config = SettingsRepository::get_model_config(pool)
         .await
         .map_err(|e| format!("Failed to read model config: {}", e))?
@@ -73,51 +73,40 @@ async fn resolve_llm_config(
     let provider = LLMProvider::from_str(&config.provider)
         .map_err(|e| format!("Unsupported LLM provider '{}': {}", config.provider, e))?;
 
-    let api_key = if provider == LLMProvider::Ollama
-        || provider == LLMProvider::BuiltInAI
-        || provider == LLMProvider::CustomOpenAI
-    {
-        String::new()
-    } else {
-        SettingsRepository::get_api_key(pool, &config.provider)
+    if provider == LLMProvider::BuiltInAI {
+        return Err(
+            "AI categorization requires a non-builtin LLM provider. Set one in Settings first."
+                .to_string(),
+        );
+    }
+
+    let effective_model_name = resolve_effective_model_name(None, Some(&config.model))
+        .ok_or_else(|| "No model configured for the selected provider.".to_string())?;
+
+    let api_key = SettingsRepository::get_api_key(pool, &config.provider)
+        .await
+        .map_err(|e| format!("Failed to read API key: {}", e))?
+        .unwrap_or_default();
+
+    let ollama_endpoint = config.ollama_endpoint.as_deref();
+
+    let custom_openai_config = if provider == LLMProvider::CustomOpenAI {
+        SettingsRepository::get_custom_openai_config(pool)
             .await
-            .map_err(|e| format!("Failed to read API key: {}", e))?
-            .unwrap_or_default()
+            .map_err(|e| format!("Failed to read custom OpenAI config: {}", e))?
+    } else {
+        None
     };
+    let custom_openai_config_ref = custom_openai_config.as_ref();
 
-    let ollama_endpoint = config.ollama_endpoint.clone();
-    let lmstudio_endpoint = config.lmstudio_endpoint.clone();
-
-    let (custom_endpoint, custom_max_tokens, custom_temperature, custom_top_p) =
-        if provider == LLMProvider::CustomOpenAI {
-            match SettingsRepository::get_custom_openai_config(pool)
-                .await
-                .map_err(|e| format!("Failed to read custom OpenAI config: {}", e))?
-            {
-                Some(c) => (
-                    Some(c.endpoint),
-                    c.max_tokens.map(|t| t as u32),
-                    c.temperature,
-                    c.top_p,
-                ),
-                None => (None, None, None, None),
-            }
-        } else if provider == LLMProvider::LmStudio {
-            (lmstudio_endpoint, None, None, None)
-        } else {
-            (None, None, None, None)
-        };
-
-    Ok((
-        provider,
-        config.model,
-        api_key,
+    resolve_provider_invocation(
+        &provider,
+        &effective_model_name,
+        Some(&api_key),
         ollama_endpoint,
-        custom_endpoint,
-        custom_max_tokens,
-        custom_temperature,
-        custom_top_p,
-    ))
+        custom_openai_config_ref,
+    )
+    .map_err(|e| format!("Failed to resolve LLM provider invocation: {}", e))
 }
 
 fn build_categorize_prompt(
@@ -209,8 +198,7 @@ async fn categorize_one(
             .await
             .map_err(|e| format!("Failed to load transcript: {}", e))?;
 
-    let (provider, model, api_key, ollama_endpoint, custom_endpoint, max_tokens, temperature, top_p) =
-        resolve_llm_config(pool).await?;
+    let invocation = resolve_llm_invocation(pool).await?;
 
     let (system_prompt, user_prompt) =
         build_categorize_prompt(&meeting.title, &transcript_excerpt, folder_names);
@@ -218,16 +206,16 @@ async fn categorize_one(
     let client = Client::new();
     let raw = generate_summary(
         &client,
-        &provider,
-        &model,
-        &api_key,
+        &invocation.provider,
+        &invocation.model_name,
+        &invocation.api_key,
         &system_prompt,
         &user_prompt,
-        ollama_endpoint.as_deref(),
-        custom_endpoint.as_deref(),
-        max_tokens,
-        temperature,
-        top_p,
+        invocation.ollama_endpoint.as_deref(),
+        invocation.custom_openai_endpoint.as_deref(),
+        invocation.custom_openai_max_tokens,
+        invocation.custom_openai_temperature,
+        invocation.custom_openai_top_p,
         app_data_dir,
         None,
     )
