@@ -38,7 +38,7 @@ const EVENTS: PipelineEvents = PipelineEvents {
 };
 
 /// Signal cancellation of an in-progress YouTube import.
-static YOUTUBE_IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
+pub(crate) static YOUTUBE_IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 /// Handle to the currently-running yt-dlp child process, if any. Lets
 /// `cancel_youtube_import_command` kill it directly — killing the process closes its
@@ -206,11 +206,11 @@ pub struct YoutubeVideoInfo {
 
 /// Result of a completed YouTube import, used to build the `youtube-import-complete`
 /// event payload (shaped like local-file import's `import-complete` payload).
-struct YoutubeImportOutcome {
-    meeting_id: String,
-    title: String,
-    segments_count: usize,
-    duration_seconds: f64,
+pub(crate) struct YoutubeImportOutcome {
+    pub meeting_id: String,
+    pub title: String,
+    pub segments_count: usize,
+    pub duration_seconds: f64,
 }
 
 /// Parse the download percentage out of a yt-dlp progress line, e.g.
@@ -227,7 +227,7 @@ fn parse_ytdlp_progress_percentage(line: &str) -> Option<u32> {
 
 /// Check whether a string looks like a YouTube video URL (watch/shorts/youtu.be/embed/
 /// live). Validation only — does not check that the video exists or is reachable.
-fn is_valid_youtube_url(url: &str) -> bool {
+pub fn is_valid_youtube_url(url: &str) -> bool {
     let parsed = match Url::parse(url) {
         Ok(u) => u,
         Err(_) => return false,
@@ -383,6 +383,7 @@ async fn execute_ytdlp_download<R: Runtime>(
     ffmpeg_path: &Path,
     url: &str,
     meeting_folder: &Path,
+    progress_event: &str,
     cookies_browser: Option<&'static str>,
 ) -> Result<(std::process::ExitStatus, String), String> {
     let output_template = meeting_folder.join("audio.%(ext)s");
@@ -453,9 +454,9 @@ async fn execute_ytdlp_download<R: Runtime>(
     while let Ok(Some(line)) = stdout_lines.next_line().await {
         if let Some(pct) = parse_ytdlp_progress_percentage(&line) {
             let overall = (pct as f32 * 0.15) as u32;
-            import_pipeline::emit_progress(
+            import_pipeline::emit_progress_dyn(
                 app,
-                EVENTS.progress,
+                progress_event,
                 "downloading",
                 overall,
                 &format!("Downloading audio... {}%", pct),
@@ -481,17 +482,26 @@ async fn execute_ytdlp_download<R: Runtime>(
 }
 
 /// Download a YouTube video's audio as WAV into `meeting_folder/audio.wav` via yt-dlp,
-/// emitting `youtube-import-progress` events for download percentage (scaled into the
-/// 0-15% range, since the shared transcription pipeline picks up at 15%).
+/// emitting progress events on `progress_event` (0-15% range, since the shared
+/// transcription pipeline picks up at 15%).
 async fn download_audio<R: Runtime>(
     app: &AppHandle<R>,
     yt_dlp_path: &Path,
     ffmpeg_path: &Path,
     url: &str,
     meeting_folder: &Path,
+    progress_event: &str,
 ) -> Result<PathBuf, String> {
-    let (mut status, mut stderr_output) =
-        execute_ytdlp_download(app, yt_dlp_path, ffmpeg_path, url, meeting_folder, None).await?;
+    let (mut status, mut stderr_output) = execute_ytdlp_download(
+        app,
+        yt_dlp_path,
+        ffmpeg_path,
+        url,
+        meeting_folder,
+        progress_event,
+        None,
+    )
+    .await?;
 
     if YOUTUBE_IMPORT_CANCELLED.load(Ordering::SeqCst) {
         return Err("YouTube import cancelled".to_string());
@@ -502,8 +512,16 @@ async fn download_audio<R: Runtime>(
             if YOUTUBE_IMPORT_CANCELLED.load(Ordering::SeqCst) {
                 return Err("YouTube import cancelled".to_string());
             }
-            if let Ok((retry_status, retry_stderr)) =
-                execute_ytdlp_download(app, yt_dlp_path, ffmpeg_path, url, meeting_folder, Some(browser)).await
+            if let Ok((retry_status, retry_stderr)) = execute_ytdlp_download(
+                app,
+                yt_dlp_path,
+                ffmpeg_path,
+                url,
+                meeting_folder,
+                progress_event,
+                Some(browser),
+            )
+            .await
             {
                 if retry_status.success() {
                     status = retry_status;
@@ -533,31 +551,39 @@ async fn download_audio<R: Runtime>(
     Ok(audio_path)
 }
 
-/// Run the YouTube import: download audio via yt-dlp, then hand off to the shared
-/// transcription pipeline (see `import_pipeline::run_transcription_pipeline`).
-async fn run_youtube_import<R: Runtime>(
-    app: AppHandle<R>,
-    url: String,
+/// Result of a successful YouTube download: paths the caller (single-URL or batch)
+/// hands off to the shared transcription pipeline.
+#[derive(Clone)]
+pub struct YoutubeDownloadResult {
+    pub meeting_folder: PathBuf,
+    pub audio_path: PathBuf,
+    pub title: String,
+    pub channel: Option<String>,
+}
+
+/// Resolve a user-supplied title and YouTube metadata for a URL, create a meeting
+/// folder, and download the audio via yt-dlp. Emits progress on `progress_event` and
+/// cleans up the folder on failure. Used by both the single-URL import command and
+/// the batch path (which calls this concurrently for each item).
+pub async fn download_youtube_audio<R: Runtime>(
+    app: &AppHandle<R>,
+    url: &str,
     title: Option<String>,
-    provider: String,
-) -> Result<YoutubeImportOutcome, String> {
+    progress_event: &str,
+) -> Result<YoutubeDownloadResult, String> {
     let yt_dlp_path = find_yt_dlp_path()?;
     let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| {
         "FFmpeg not found, but is required by yt-dlp to extract audio. Please install FFmpeg.".to_string()
     })?;
 
-    info!("Starting YouTube import for {}", url);
-
-    // Best-effort metadata lookup for the title/channel; a failure here shouldn't block
-    // the import, since the user (or a fallback title) can still carry it through.
-    let video_info = fetch_youtube_video_info(&yt_dlp_path, &url).await.ok();
+    let video_info = fetch_youtube_video_info(&yt_dlp_path, url).await.ok();
     let resolved_title = title
         .filter(|t| !t.trim().is_empty())
         .or_else(|| video_info.as_ref().map(|i| i.title.clone()))
         .unwrap_or_else(|| "YouTube Import".to_string());
     let channel = video_info.and_then(|i| i.channel);
 
-    import_pipeline::emit_progress(&app, EVENTS.progress, "downloading", 0, "Starting download...");
+    import_pipeline::emit_progress_dyn(app, progress_event, "downloading", 0, "Starting download...");
 
     if YOUTUBE_IMPORT_CANCELLED.load(Ordering::SeqCst) {
         return Err("YouTube import cancelled".to_string());
@@ -567,24 +593,49 @@ async fn run_youtube_import<R: Runtime>(
     let meeting_folder =
         create_meeting_folder(&base_folder, &resolved_title, false).map_err(|e| e.to_string())?;
 
-    let audio_path = match download_audio(&app, &yt_dlp_path, &ffmpeg_path, &url, &meeting_folder).await {
+    let audio_path = match download_audio(
+        app,
+        &yt_dlp_path,
+        &ffmpeg_path,
+        url,
+        &meeting_folder,
+        progress_event,
+    )
+    .await
+    {
         Ok(path) => path,
         Err(e) => {
-            // Unlike a local-file copy, a failed download leaves no useful audio
-            // artifact behind, so clean up immediately rather than leaving an empty
-            // meeting folder around.
             let _ = std::fs::remove_dir_all(&meeting_folder);
             return Err(e);
         }
     };
 
-    if YOUTUBE_IMPORT_CANCELLED.load(Ordering::SeqCst) {
-        let _ = std::fs::remove_dir_all(&meeting_folder);
-        return Err("YouTube import cancelled".to_string());
-    }
+    Ok(YoutubeDownloadResult {
+        meeting_folder,
+        audio_path,
+        title: resolved_title,
+        channel,
+    })
+}
+
+/// Run the shared transcription pipeline against an already-downloaded YouTube audio
+/// file and write the meeting metadata. Used by both the single-URL command and the
+/// batch path (which calls this serially for each downloaded item).
+pub(crate) async fn transcribe_youtube_download<R: Runtime>(
+    app: &AppHandle<R>,
+    download: YoutubeDownloadResult,
+    url: &str,
+    provider: String,
+) -> Result<YoutubeImportOutcome, String> {
+    let YoutubeDownloadResult {
+        meeting_folder,
+        audio_path,
+        title: resolved_title,
+        channel,
+    } = download;
 
     let output = import_pipeline::run_transcription_pipeline(
-        &app,
+        app,
         &meeting_folder,
         &audio_path,
         &resolved_title,
@@ -614,7 +665,7 @@ async fn run_youtube_import<R: Runtime>(
         warn!("Failed to write metadata.json: {}", e);
     }
 
-    import_pipeline::emit_progress(&app, EVENTS.progress, "complete", 100, "Import complete");
+    import_pipeline::emit_progress(app, EVENTS.progress, "complete", 100, "Import complete");
 
     Ok(YoutubeImportOutcome {
         meeting_id: output.meeting_id,
@@ -622,6 +673,26 @@ async fn run_youtube_import<R: Runtime>(
         segments_count: output.segments.len(),
         duration_seconds: output.duration_seconds,
     })
+}
+
+/// Run the single-URL YouTube import: download audio via yt-dlp, then hand off to
+/// the shared transcription pipeline.
+async fn run_youtube_import<R: Runtime>(
+    app: AppHandle<R>,
+    url: String,
+    title: Option<String>,
+    provider: String,
+) -> Result<YoutubeImportOutcome, String> {
+    info!("Starting YouTube import for {}", url);
+
+    let download = download_youtube_audio(&app, &url, title, EVENTS.progress).await?;
+
+    if YOUTUBE_IMPORT_CANCELLED.load(Ordering::SeqCst) {
+        let _ = std::fs::remove_dir_all(&download.meeting_folder);
+        return Err("YouTube import cancelled".to_string());
+    }
+
+    transcribe_youtube_download(&app, download, &url, provider).await
 }
 
 // ============================================================================

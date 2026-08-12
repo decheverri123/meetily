@@ -84,6 +84,26 @@ pub(crate) fn emit_progress<R: Runtime>(
     );
 }
 
+/// Same as `emit_progress` but takes a non-`'static` event name. Used by the YouTube
+/// batch path, which builds per-item event names from a runtime UUID and so can't
+/// pass a `&'static str`.
+pub(crate) fn emit_progress_dyn<R: Runtime>(
+    app: &AppHandle<R>,
+    event: &str,
+    stage: &str,
+    progress: u32,
+    message: &str,
+) {
+    let _ = app.emit(
+        event,
+        PipelineProgress {
+            stage: stage.to_string(),
+            progress_percentage: progress,
+            message: message.to_string(),
+        },
+    );
+}
+
 fn emit_warning<R: Runtime>(app: &AppHandle<R>, event: &'static str, warning: &str, details: Option<String>) {
     let _ = app.emit(
         event,
