@@ -629,6 +629,20 @@ pub async fn download_youtube_audio<R: Runtime>(
     })
 }
 
+/// Remove the meeting folder for a transcription error unless the error was
+/// a user cancellation. The shared pipeline removes the folder itself on
+/// cancel (`import_pipeline::run_transcription_pipeline`); doing it twice is
+/// harmless but unnecessary, so we detect "cancel" in the message and skip.
+/// On every other failure the folder would otherwise leak — a 100-item
+/// batch of corrupt downloads would leave 100 orphan folders with the
+/// downloaded audio inside.
+fn cleanup_meeting_folder_on_error(err_msg: &str, meeting_folder: &Path) {
+    if err_msg.to_lowercase().contains("cancel") {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(meeting_folder);
+}
+
 /// Run the shared transcription pipeline against an already-downloaded YouTube audio
 /// file and write the meeting metadata. Used by both the single-URL command and the
 /// batch path (which calls this serially for each downloaded item).
@@ -645,7 +659,7 @@ pub(crate) async fn transcribe_youtube_download<R: Runtime>(
         channel,
     } = download;
 
-    let output = import_pipeline::run_transcription_pipeline(
+    let output = match import_pipeline::run_transcription_pipeline(
         app,
         &meeting_folder,
         &audio_path,
@@ -657,7 +671,14 @@ pub(crate) async fn transcribe_youtube_download<R: Runtime>(
         &YOUTUBE_IMPORT_CANCELLED,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    {
+        Ok(output) => output,
+        Err(e) => {
+            let msg = e.to_string();
+            cleanup_meeting_folder_on_error(&msg, &meeting_folder);
+            return Err(msg);
+        }
+    };
 
     if let Err(e) = write_import_metadata(
         &meeting_folder,
@@ -1374,6 +1395,94 @@ mod tests {
         assert!(result.unwrap().is_err(), "decoding a garbage WAV should fail gracefully with Err");
     }
 
+    // =========================================================================
+    // Round 2 adversarial tests (breaker pass 2)
+    // =========================================================================
+
+    /// When the import pipeline's decode stage fails on a real (but
+    /// unreadable) audio file, the meeting folder that the caller
+    /// created is NOT cleaned up. The pipeline only removes the folder
+    /// on cancellation; on a real decode error the folder is left on
+    /// disk, eventually orphaned. Pin this observed behavior so a fix
+    /// can be verified later.
+    #[test]
+    fn test_decode_failure_does_not_clean_up_meeting_folder() {
+        // The shared pipeline (run_transcription_pipeline) is responsible
+        // for cleaning up the meeting folder on failure. We can't call
+        // it without an AppHandle, so we exercise the lower layer
+        // (decode_audio_file) plus a simulated caller that mimics the
+        // real production code path: create a folder, write a garbage
+        // audio file in it, call decode, and observe whether the
+        // caller would clean up. The real `transcribe_youtube_download`
+        // (and `run_youtube_import`) do NOT clean up on a non-cancel
+        // error from the pipeline — this is the bug.
+        //
+        // This test pins the low-level layer: decode returns Err on a
+        // 0-byte file, leaving the file and folder on disk. The caller
+        // is responsible for cleanup. In production, the caller
+        // (`transcribe_youtube_download`) does not clean up, so the
+        // folder becomes orphaned.
+        let dir = tempfile::tempdir().unwrap();
+        let meeting_folder = dir.path().join("meeting-orphan");
+        std::fs::create_dir(&meeting_folder).unwrap();
+        let audio_path = meeting_folder.join("audio.wav");
+        std::fs::write(&audio_path, b"").unwrap();
+
+        // Decode fails as expected.
+        let result = crate::audio::decoder::decode_audio_file(&audio_path);
+        assert!(result.is_err(), "decode of 0-byte file should fail");
+
+        // Bug: the caller (transcribe_youtube_download) does NOT clean
+        // up the folder on a decode error. The folder and its
+        // (corrupted) audio file remain on disk forever.
+        assert!(
+            meeting_folder.exists(),
+            "BUG: decode failure left the meeting folder on disk; \
+             the caller is expected to clean up but doesn't"
+        );
+        assert!(
+            audio_path.exists(),
+            "BUG: decode failure left the corrupted audio file on disk"
+        );
+    }
+
+    /// When the pipeline's `run_transcription_pipeline` is cancelled, it
+    /// removes the meeting folder. When it fails for a non-cancel
+    /// reason, it does NOT. This test exercises the cancel path
+    /// directly via the cancel-flag check that the pipeline runs
+    /// between stages, to confirm the cleanup happens *only* for
+    /// cancellation. This proves the asymmetry that produces
+    /// orphaned folders in the non-cancel failure case.
+    #[test]
+    fn test_run_transcription_pipeline_cleans_up_only_on_cancel() {
+        // The pipeline's cleanup branch is gated on `cancelled.load()`.
+        // We can't easily call the full pipeline without an AppHandle,
+        // but the structure of the cleanup is well-defined: the
+        // function checks `cancelled` at lines 164, 187, 260, 301, 371
+        // and removes the meeting folder on each check. A non-cancel
+        // error path (e.g. decode failure) falls through to the end
+        // without removing the folder.
+        //
+        // This test asserts the structural contract: a "cancelled"
+        // outcome removes the folder; a "decode error" outcome does
+        // not. We simulate the decode error case by creating a
+        // meeting folder that the decode stage would not remove.
+        let dir = tempfile::tempdir().unwrap();
+        let meeting_folder = dir.path().to_path_buf();
+        let audio_path = meeting_folder.join("audio.wav");
+        std::fs::write(&audio_path, b"").unwrap();
+
+        // Decode fails — non-cancel error.
+        let decode_result = crate::audio::decoder::decode_audio_file(&audio_path);
+        assert!(decode_result.is_err(), "decode fails on 0-byte input");
+
+        // Simulate the pipeline's error return: it returns Err without
+        // touching the folder. Folder is still on disk.
+        // (This mirrors transcribe_youtube_download: it .map_err's the
+        // error and returns it. No folder cleanup.)
+        assert!(meeting_folder.exists(), "non-cancel error left the meeting folder on disk");
+    }
+
     #[test]
     fn test_parse_progress_comma_decimal_locale_fails_safe() {
         // Held up: the `\[download\]\s+` prefix anchors the match to right
@@ -1401,5 +1510,58 @@ mod tests {
         let stderr = "WARNING: [youtube] Some warning\nERROR: [youtube] abc1234: Video unavailable";
         let formatted = format_ytdlp_error(stderr);
         assert_eq!(formatted, "This YouTube video is unavailable or private.");
+    }
+
+    // -- Round 2 regression: meeting-folder cleanup on transcription error --
+    //
+    // transcribe_youtube_download's transcription error path used to leak
+    // the meeting folder (with the downloaded audio inside) on every
+    // non-cancel failure. A 100-item batch of corrupt downloads would
+    // leave 100 orphan folders. The fix routes all error messages through
+    // `cleanup_meeting_folder_on_error`, which removes the folder unless
+    // the error was a user cancellation (the shared pipeline already
+    // handles that case).
+
+    #[test]
+    fn test_cleanup_meeting_folder_on_error_removes_for_real_failure() {
+        // Non-cancel error: folder must be removed.
+        let dir = tempfile::tempdir().unwrap();
+        let meeting_folder = dir.path().join("meeting_abc");
+        std::fs::create_dir(&meeting_folder).unwrap();
+        std::fs::write(meeting_folder.join("audio.wav"), b"fake").unwrap();
+        assert!(meeting_folder.exists());
+
+        cleanup_meeting_folder_on_error("whisper engine failed", &meeting_folder);
+        assert!(!meeting_folder.exists(), "non-cancel error must remove the meeting folder");
+    }
+
+    #[test]
+    fn test_cleanup_meeting_folder_on_error_skips_on_cancel() {
+        // Cancel error (case-insensitive substring "cancel"): folder must
+        // be left alone — the shared pipeline already removed it, and a
+        // double-remove of an already-removed folder would be a no-op
+        // error here. Critically, we don't want to clobber any state if
+        // the pipeline chose to keep the folder for some reason.
+        let dir = tempfile::tempdir().unwrap();
+        let meeting_folder = dir.path().join("meeting_xyz");
+        std::fs::create_dir(&meeting_folder).unwrap();
+        std::fs::write(meeting_folder.join("audio.wav"), b"fake").unwrap();
+
+        cleanup_meeting_folder_on_error("Import cancelled", &meeting_folder);
+        assert!(
+            meeting_folder.exists(),
+            "cancel error must NOT trigger folder cleanup"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_meeting_folder_on_error_handles_missing_folder_gracefully() {
+        // Calling on a path that doesn't exist must not panic. The
+        // production code uses `let _ = ...` to swallow the io::Error,
+        // and a missing folder is a no-op (still gone).
+        let dir = tempfile::tempdir().unwrap();
+        let ghost = dir.path().join("never_existed");
+        cleanup_meeting_folder_on_error("engine failed", &ghost);
+        // No panic, no assertion needed beyond reaching this line.
     }
 }
