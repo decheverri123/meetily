@@ -9,6 +9,8 @@ pub struct MeetingModel {
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub folder_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_folder_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
@@ -19,6 +21,14 @@ impl From<NaiveDateTime> for DateTimeUtc {
     fn from(naive: NaiveDateTime) -> Self {
         DateTimeUtc(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
     }
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct FolderModel {
+    pub id: String,
+    pub name: String,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
 }
 
 // Renamed from TranscriptSegment to Transcript to match the table name

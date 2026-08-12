@@ -656,6 +656,15 @@ pub fn run() {
             api::api_save_transcript,
             api::open_meeting_folder,
             api::open_external_url,
+            // Folder commands
+            api::folders::api_get_folders,
+            api::folders::api_create_folder,
+            api::folders::api_rename_folder,
+            api::folders::api_delete_folder,
+            api::folders::api_assign_meeting_to_folder,
+            api::folders::api_ai_categorize_meeting,
+            api::folders::api_ai_categorize_all_meetings,
+            api::folders::api_get_meetings_with_folders,
             // Custom OpenAI commands
             api::api_save_custom_openai_config,
             api::api_get_custom_openai_config,
