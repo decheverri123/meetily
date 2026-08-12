@@ -522,4 +522,190 @@ mod tests {
         let list = FoldersRepository::list_folders(&pool).await.unwrap();
         assert_eq!(list.iter().filter(|f| f.name == "Race").count(), 2);
     }
+
+    // =========================================================================
+    // Round 2 adversarial tests (breaker pass 2)
+    // =========================================================================
+    // Verify round 1 zero-width fix is wired through *both* create and rename,
+    // exercise concurrent races from a different code path, and probe the
+    // AI-categorize "folder deleted mid-flight" failure mode.
+
+    #[tokio::test]
+    async fn rename_folder_rejects_unicode_whitespace_only_name() {
+        // Round 1 added a zero-width check via `is_blank_name`. The same
+        // function also rejects non-trimmed Unicode whitespace (NBSP, em
+        // space, ideographic space), but the round-1 test exercised
+        // create_folder. Verify the rename path rejects it too — a
+        // folder could be made visually blank by renaming it.
+        let pool = setup_pool().await;
+        let folder = FoldersRepository::create_folder(&pool, "Real").await.unwrap();
+        for weird in [
+            "\u{00A0}",                  // NBSP
+            "\u{2003}",                  // em space
+            "\u{3000}",                  // ideographic space
+            "\u{00A0}\u{2003}\u{3000}",  // mix
+        ] {
+            let err = FoldersRepository::rename_folder(&pool, &folder.id, weird)
+                .await
+                .expect_err("non-trimmed whitespace rename should be rejected");
+            assert!(
+                matches!(err, SqlxError::Protocol(_)),
+                "expected Protocol error for non-trimmed whitespace rename input {:?}, got {:?}",
+                weird,
+                err
+            );
+            // The original name must remain unchanged.
+            let stored = FoldersRepository::get_folder(&pool, &folder.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stored.name, "Real",
+                "non-trimmed whitespace rename leaked through for {:?}",
+                weird
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_folder_rejects_combined_zero_width_and_whitespace() {
+        // The validator is `is_blank_name`, which accepts a name only if
+        // it has at least one non-whitespace, non-zero-width char. Confirm
+        // a name that mixes *both* kinds of invisible chars is still
+        // rejected — this is the exact shape a malicious client could send
+        // to bypass a per-class check.
+        let pool = setup_pool().await;
+        let folder = FoldersRepository::create_folder(&pool, "Real").await.unwrap();
+        for sneaky in [
+            "\u{00A0}\u{200B}",  // NBSP + ZWSP
+            "\u{3000}\u{FEFF}",  // ideographic space + BOM
+            " \t\u{200B}\u{00A0}\n ",  // ASCII ws + ZWSP + NBSP + ASCII ws
+        ] {
+            let err = FoldersRepository::rename_folder(&pool, &folder.id, sneaky)
+                .await
+                .expect_err("sneaky-blank rename should be rejected");
+            assert!(
+                matches!(err, SqlxError::Protocol(_)),
+                "expected Protocol error for sneaky-blank input {:?}, got {:?}",
+                sneaky,
+                err
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_folder_accepts_name_with_zero_width_inside_visible_text() {
+        // The zero-width check rejects names composed *only* of zero-width
+        // chars. A name like "Eng\u{200B}ineering" should still be
+        // accepted — zero-width chars are legal inside a real word. This
+        // pins the contract so a future tightening doesn't break it.
+        let pool = setup_pool().await;
+        let f = FoldersRepository::create_folder(&pool, "Eng\u{200B}ineering")
+            .await
+            .expect("name with embedded ZWSP should be accepted");
+        let stored = FoldersRepository::get_folder(&pool, &f.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.name, "Eng\u{200B}ineering");
+    }
+
+    #[tokio::test]
+    async fn assign_meeting_to_deleted_folder_fails_with_fk_error() {
+        // Race scenario: an AI-categorize pass queries the folders table,
+        // picks a folder id, then tries to assign a meeting. If the folder
+        // is deleted between the query and the assign, the FK constraint
+        // must reject the assignment. The categorize code path doesn't
+        // // recover from this — it logs the error and the meeting is
+        // left unfiled. Document the failure mode here.
+        let pool = setup_pool().await;
+        let folder = FoldersRepository::create_folder(&pool, "Will Vanish")
+            .await
+            .unwrap();
+        insert_meeting(&pool, "m1").await;
+
+        // Sanity: assignment works before the delete.
+        FoldersRepository::assign_meeting(&pool, "m1", Some(&folder.id))
+            .await
+            .expect("baseline assign should work");
+
+        // Delete the folder (FK ON DELETE SET NULL clears the link).
+        FoldersRepository::delete_folder(&pool, &folder.id)
+            .await
+            .unwrap();
+
+        // Re-assigning with the now-deleted id must fail at the DB layer.
+        let result =
+            FoldersRepository::assign_meeting(&pool, "m1", Some(&folder.id)).await;
+        assert!(
+            result.is_err(),
+            "expected FK violation when assigning to deleted folder id, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_folder_concurrent_with_assign_does_not_corrupt_state() {
+        // Race: a long-running categorize pass reads folder X, the user
+        // deletes folder X, and the categorize pass then tries to assign.
+        // Confirm the DB stays in a consistent state — either the assign
+        // succeeded before the delete (and the meeting is now unfiled via
+        // SET NULL), or the delete happened first and the assign fails
+        // cleanly. In no case should the meetings table be left with a
+        // dangling folder id.
+        let pool = setup_pool().await;
+        let folder = FoldersRepository::create_folder(&pool, "Race Folder")
+            .await
+            .unwrap();
+        insert_meeting(&pool, "m1").await;
+        FoldersRepository::assign_meeting(&pool, "m1", Some(&folder.id))
+            .await
+            .unwrap();
+
+        let pool_a = pool.clone();
+        let pool_b = pool.clone();
+        let id = folder.id.clone();
+        let h_assign = tokio::spawn(async move {
+            FoldersRepository::assign_meeting(&pool_a, "m1", Some(&id)).await
+        });
+        let id_b = folder.id.clone();
+        let h_delete = tokio::spawn(async move {
+            FoldersRepository::delete_folder(&pool_b, &id_b).await
+        });
+
+        let assign_result = h_assign.await.unwrap();
+        let _delete_result = h_delete.await.unwrap();
+
+        // Whatever the ordering, no meeting may have a folder_id pointing
+        // at a non-existent folder.
+        let dangling: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM meetings m
+             WHERE m.meeting_folder_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM folders f WHERE f.id = m.meeting_folder_id)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            dangling.0, 0,
+            "found meetings with dangling folder_id after concurrent delete+assign"
+        );
+
+        // The meeting must still exist (no row was deleted by this race).
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT meeting_folder_id FROM meetings WHERE id = 'm1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if let Some(fid) = row.0.as_deref() {
+            // If a folder_id survived, the folder must still exist.
+            let still_there: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM folders WHERE id = ?")
+                .bind(fid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(still_there.0, 1, "meeting references a deleted folder");
+        }
+        let _ = assign_result; // may be Err or Ok depending on ordering
+    }
 }
