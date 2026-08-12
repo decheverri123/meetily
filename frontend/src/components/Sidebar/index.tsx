@@ -4,6 +4,7 @@ import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { ChevronDown, ChevronRight, File, Settings, ChevronLeftCircle, ChevronRightCircle, Calendar, StickyNote, Home, Trash2, Mic, Square, Plus, Search, Pencil, NotebookPen, SearchIcon, X, Upload, Folder, FolderPlus, Sparkles, MoreVertical } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useSidebar } from './SidebarProvider';
+import { FOLDER_ROOT_ID, type SidebarItem } from './folderTree';
 import { ConfirmationModal } from '../ConfirmationModel/confirmation-modal';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { SettingTabs } from '../SettingTabs';
@@ -31,17 +32,6 @@ import Info from '../Info';
 import { ComplianceNotification } from '../ComplianceNotification';
 import { Input } from '../ui/input';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '../ui/input-group';
-
-interface SidebarItem {
-  id: string;
-  title: string;
-  type: 'folder' | 'file';
-  children?: SidebarItem[];
-  meetingId?: string;
-  folderId?: string;
-}
-
-const FOLDER_ROOT_ID = 'folders-root';
 
 const Sidebar: React.FC = () => {
   const router = useRouter();
@@ -297,7 +287,7 @@ const Sidebar: React.FC = () => {
             // Filter children based on search results or title match
             const filteredChildren = folder.children.filter(item => {
               // Include if the meeting ID is in our search results
-              if (matchedMeetingIds.has(item.id)) return true;
+              if (item.meetingId && matchedMeetingIds.has(item.meetingId)) return true;
 
               // Or if the title matches the search query
               return item.title.toLowerCase().includes(searchQuery.toLowerCase());
@@ -310,7 +300,7 @@ const Sidebar: React.FC = () => {
           }
 
           // For non-folder items, check if they match the search
-          return (matchedMeetingIds.has(folder.id) ||
+          return ((folder.meetingId && matchedMeetingIds.has(folder.meetingId)) ||
             folder.title.toLowerCase().includes(searchQuery.toLowerCase()))
             ? folder : undefined;
         })
