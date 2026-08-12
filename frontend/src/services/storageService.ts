@@ -24,6 +24,35 @@ export interface Meeting {
   [key: string]: any; // Allow additional properties from backend
 }
 
+export interface Folder {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MeetingWithFolder {
+  id: string;
+  title: string;
+  folder_id: string | null;
+  folder_name: string | null;
+}
+
+export interface CategorizeResult {
+  meeting_id: string;
+  folder_id: string | null;
+  folder_name: string | null;
+  suggested_new_folder: string | null;
+}
+
+export interface BatchCategorizeResult {
+  total: number;
+  assigned: number;
+  suggested_new: number;
+  failed: number;
+  results: CategorizeResult[];
+}
+
 /**
  * Storage Service
  * Singleton service for managing meeting storage operations
@@ -63,6 +92,50 @@ export class StorageService {
    */
   async getMeetings(): Promise<Meeting[]> {
     return invoke<Meeting[]>('api_get_meetings');
+  }
+
+  async getFolders(): Promise<Folder[]> {
+    return invoke<Folder[]>('api_get_folders');
+  }
+
+  async createFolder(name: string): Promise<Folder> {
+    return invoke<Folder>('api_create_folder', { name });
+  }
+
+  async renameFolder(id: string, name: string): Promise<boolean> {
+    return invoke<boolean>('api_rename_folder', { id, name });
+  }
+
+  async deleteFolder(id: string): Promise<boolean> {
+    return invoke<boolean>('api_delete_folder', { id });
+  }
+
+  async assignMeetingToFolder(
+    meetingId: string,
+    folderId: string | null
+  ): Promise<boolean> {
+    return invoke<boolean>('api_assign_meeting_to_folder', {
+      meetingId,
+      folderId,
+    });
+  }
+
+  async aiCategorizeMeeting(
+    meetingId: string,
+    folderIds?: string[]
+  ): Promise<CategorizeResult> {
+    return invoke<CategorizeResult>('api_ai_categorize_meeting', {
+      meetingId,
+      folderIds: folderIds ?? null,
+    });
+  }
+
+  async aiCategorizeAllMeetings(): Promise<BatchCategorizeResult> {
+    return invoke<BatchCategorizeResult>('api_ai_categorize_all_meetings');
+  }
+
+  async getMeetingsWithFolders(): Promise<MeetingWithFolder[]> {
+    return invoke<MeetingWithFolder[]>('api_get_meetings_with_folders');
   }
 }
 

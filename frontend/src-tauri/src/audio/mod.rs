@@ -57,6 +57,9 @@ pub(crate) mod import_pipeline;
 // YouTube import module (download audio via yt-dlp, then reuse import_pipeline)
 pub mod youtube_import;
 
+// YouTube batch import module (parallel downloads, serial transcription)
+pub mod youtube_batch;
+
 pub use devices::{
     default_input_device, default_output_device, get_device_and_config, list_audio_devices,
     parse_audio_device, stabilize_microphone, trigger_audio_permission,

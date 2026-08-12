@@ -13,6 +13,9 @@ import {
   ChevronDown,
   ChevronUp,
   Youtube,
+  ListPlus,
+  Trash2,
+  Play,
 } from 'lucide-react';
 import {
   Dialog,
@@ -24,6 +27,7 @@ import {
 } from '../ui/dialog';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { Textarea } from '../ui/textarea';
 import {
   Select,
   SelectContent,
@@ -36,12 +40,14 @@ import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useImportAudio, ImportResult } from '@/hooks/useImportAudio';
 import { useYoutubeImport, YoutubeImportResult } from '@/hooks/useYoutubeImport';
+import { useYoutubeBatchImport, BatchItemStatus } from '@/hooks/useYoutubeBatchImport';
 import { useRouter } from 'next/navigation';
 import { useSidebar } from '../Sidebar/SidebarProvider';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 
 type ImportTab = 'upload' | 'youtube';
+type YoutubeSubTab = 'single' | 'batch';
 
 
 interface ImportAudioDialogProps {
@@ -69,6 +75,24 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+function BatchItemStatusIcon({ status }: { status: BatchItemStatus }) {
+  switch (status) {
+    case 'pending':
+      return <span className="h-3.5 w-3.5 rounded-full border border-muted-foreground/40 flex-shrink-0" />;
+    case 'downloading':
+    case 'transcribing':
+      return <Loader2 className="h-3.5 w-3.5 animate-spin text-primary flex-shrink-0" />;
+    case 'downloaded':
+      return <CheckCircle2 className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />;
+    case 'complete':
+      return <CheckCircle2 className="h-3.5 w-3.5 text-success flex-shrink-0" />;
+    case 'failed':
+      return <AlertCircle className="h-3.5 w-3.5 text-destructive flex-shrink-0" />;
+    case 'cancelled':
+      return <X className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />;
+  }
+}
+
 export function ImportAudioDialog({
   open,
   onOpenChange,
@@ -85,9 +109,11 @@ export function ImportAudioDialog({
   const [titleModifiedByUser, setTitleModifiedByUser] = useState(false);
 
   const [activeTab, setActiveTab] = useState<ImportTab>('upload');
+  const [youtubeSubTab, setYoutubeSubTab] = useState<YoutubeSubTab>('single');
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [youtubeTitle, setYoutubeTitle] = useState('');
   const [youtubeTitleModifiedByUser, setYoutubeTitleModifiedByUser] = useState(false);
+  const [batchInput, setBatchInput] = useState('');
 
   // Always start as false — represents "dialog has not yet been opened".
   // Do NOT initialize from the `open` prop: if the component mounts with open=true
@@ -170,6 +196,68 @@ export function ImportAudioDialog({
     setYoutubeTitleModifiedByUser(false);
   }, [resetYoutube]);
 
+  const {
+    queue: batchQueue,
+    setQueue: setBatchQueue,
+    status: batchStatus,
+    items: batchItems,
+    completed: batchCompleted,
+    failed: batchFailed,
+    isProcessing: batchIsProcessing,
+    isFinished: batchIsFinished,
+    error: batchError,
+    startBatch,
+    cancelBatch,
+    reset: resetBatch,
+    parseQueue,
+  } = useYoutubeBatchImport();
+
+  const batchValidCount = useMemo(
+    () => batchQueue.filter((q) => q.valid).length,
+    [batchQueue]
+  );
+
+  const handleBatchQueueChange = useCallback(
+    (text: string) => {
+      setBatchInput(text);
+      setBatchQueue(parseQueue(text));
+    },
+    [parseQueue, setBatchQueue]
+  );
+
+  const handleStartBatch = useCallback(async () => {
+    const titles = batchQueue
+      .filter((q) => q.valid)
+      .map((q) => (q.title?.trim() ? q.title.trim() : null));
+    await startBatch(titles);
+  }, [batchQueue, startBatch]);
+
+  const handleBatchComplete = useCallback(
+    (completedCount: number, failedCount: number, cancelled: boolean) => {
+      if (cancelled) {
+        toast.info('Batch cancelled', {
+          description: `${completedCount} completed, ${failedCount} failed before cancel`,
+        });
+        return;
+      }
+      if (failedCount > 0) {
+        toast.warning(`Batch finished with errors`, {
+          description: `${completedCount} completed, ${failedCount} failed`,
+        });
+      } else {
+        toast.success(`Batch complete: ${completedCount} imported`);
+      }
+      refetchMeetings();
+    },
+    [refetchMeetings]
+  );
+
+  useEffect(() => {
+    if (batchIsFinished) {
+      handleBatchComplete(batchCompleted, batchFailed, batchStatus === 'idle');
+    }
+  }, [batchIsFinished, batchCompleted, batchFailed, batchStatus, handleBatchComplete]);
+
   // Reset state only when dialog transitions from closed to open
   // This prevents re-initialization when config changes while dialog is already open (Bug #4 & #5)
   useEffect(() => {
@@ -186,6 +274,9 @@ export function ImportAudioDialog({
       setShowAdvanced(false);
 
       resetYoutubeFlow();
+      setYoutubeSubTab('single');
+      setBatchInput('');
+      resetBatch();
       setActiveTab('upload');
 
       // Validate preselected file if provided
@@ -269,18 +360,23 @@ export function ImportAudioDialog({
     await startYoutubeImport(youtubeTitle || videoInfo.title);
   };
 
-  // Combined processing flag across both tabs, used to guard dialog close/tab-switch
-  const anyTabProcessing = isProcessing || youtubeIsProcessing;
+  // Combined processing flag across all tabs, used to guard dialog close/tab-switch
+  const anyTabProcessing = isProcessing || youtubeIsProcessing || batchIsProcessing;
 
   // Values driving the header/progress/footer/cancel, scoped to whichever tab is active
-  const activeStatus = activeTab === 'upload' ? status : youtubeStatus;
-  const activeError = activeTab === 'upload' ? error : youtubeError;
-  const activeIsProcessing = activeTab === 'upload' ? isProcessing : youtubeIsProcessing;
-  const activeProgress = activeTab === 'upload' ? progress : youtubeProgress;
-  const activeReset = activeTab === 'upload' ? reset : resetYoutube;
-  const activeCancelImport = activeTab === 'upload' ? cancelImport : cancelYoutubeImport;
-  const activeImportDisabled = activeTab === 'upload' ? !fileInfo : !videoInfo;
-  const handleActiveImport = activeTab === 'upload' ? handleStartImport : handleStartYoutubeImport;
+  const isBatchMode = activeTab === 'youtube' && youtubeSubTab === 'batch';
+  const activeStatus = isBatchMode ? batchStatus : (activeTab === 'upload' ? status : youtubeStatus);
+  const activeError = isBatchMode ? batchError : (activeTab === 'upload' ? error : youtubeError);
+  const activeIsProcessing = isBatchMode ? batchIsProcessing : (activeTab === 'upload' ? isProcessing : youtubeIsProcessing);
+  const activeProgress = isBatchMode ? null : (activeTab === 'upload' ? progress : youtubeProgress);
+  const activeReset = isBatchMode ? resetBatch : (activeTab === 'upload' ? reset : resetYoutube);
+  const activeCancelImport = isBatchMode ? cancelBatch : (activeTab === 'upload' ? cancelImport : cancelYoutubeImport);
+  const activeImportDisabled = isBatchMode
+    ? batchValidCount === 0
+    : (activeTab === 'upload' ? !fileInfo : !videoInfo);
+  const handleActiveImport = isBatchMode
+    ? handleStartBatch
+    : (activeTab === 'upload' ? handleStartImport : handleStartYoutubeImport);
 
   const handleCancel = async () => {
     if (activeIsProcessing) {
@@ -322,7 +418,11 @@ export function ImportAudioDialog({
             {activeIsProcessing ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                {activeTab === 'upload' ? 'Importing Audio...' : 'Importing from YouTube...'}
+                {isBatchMode
+                  ? 'Importing YouTube Batch...'
+                  : activeTab === 'upload'
+                  ? 'Importing Audio...'
+                  : 'Importing from YouTube...'}
               </>
             ) : activeError ? (
               <>
@@ -339,6 +439,11 @@ export function ImportAudioDialog({
                 <Upload className="h-5 w-5 text-primary" />
                 Import Audio File
               </>
+            ) : isBatchMode ? (
+              <>
+                <ListPlus className="h-5 w-5 text-primary" />
+                Batch Import from YouTube
+              </>
             ) : (
               <>
                 <Youtube className="h-5 w-5 text-primary" />
@@ -351,6 +456,8 @@ export function ImportAudioDialog({
               ? activeProgress?.message || 'Processing...'
               : activeError
               ? 'An error occurred during import'
+              : isBatchMode
+              ? 'Paste one YouTube URL per line. Downloads run in parallel; transcription runs serially.'
               : 'Import an audio file or a YouTube video to create a new meeting with transcripts'}
           </DialogDescription>
         </DialogHeader>
@@ -519,7 +626,36 @@ export function ImportAudioDialog({
           </TabsContent>
 
           <TabsContent value="youtube" className="space-y-4 py-2">
-            {!youtubeIsProcessing && !youtubeError && (
+            <div className="flex items-center gap-2 p-1 rounded-lg bg-secondary/20 w-fit">
+              <button
+                type="button"
+                onClick={() => setYoutubeSubTab('single')}
+                disabled={batchIsProcessing}
+                className={`px-3 py-1.5 text-sm font-medium rounded-md flex items-center gap-1.5 ${
+                  youtubeSubTab === 'single'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <Youtube className="h-3.5 w-3.5" />
+                Single
+              </button>
+              <button
+                type="button"
+                onClick={() => setYoutubeSubTab('batch')}
+                disabled={youtubeIsProcessing}
+                className={`px-3 py-1.5 text-sm font-medium rounded-md flex items-center gap-1.5 ${
+                  youtubeSubTab === 'batch'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <ListPlus className="h-3.5 w-3.5" />
+                Batch
+              </button>
+            </div>
+
+            {youtubeSubTab === 'single' && !youtubeIsProcessing && !youtubeError && (
               <>
                 {videoInfo ? (
                   <div className="glass-card p-4 space-y-3">
@@ -602,6 +738,125 @@ export function ImportAudioDialog({
                 )}
               </>
             )}
+
+            {youtubeSubTab === 'batch' && !batchIsProcessing && !batchIsFinished && (
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <label className="text-sm font-medium text-foreground/80">YouTube URLs</label>
+                  <Textarea
+                    value={batchInput}
+                    onChange={(e) => handleBatchQueueChange(e.target.value)}
+                    placeholder={'Paste YouTube URLs, one per line:\nhttps://www.youtube.com/watch?v=...\nhttps://youtu.be/...'}
+                    rows={6}
+                    className="font-mono text-sm"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {batchValidCount > 0
+                      ? `${batchValidCount} valid URL${batchValidCount === 1 ? '' : 's'} ready`
+                      : 'Enter at least one YouTube URL to start a batch'}
+                    {batchQueue.length > batchValidCount &&
+                      ` · ${batchQueue.length - batchValidCount} invalid`}
+                  </p>
+                </div>
+
+                {batchQueue.length > 0 && (
+                  <div className="border border-border/10 rounded-lg max-h-40 overflow-y-auto">
+                    {batchQueue.map((entry, idx) => (
+                      <div
+                        key={`${entry.url}-${idx}`}
+                        className={`flex items-center gap-2 px-3 py-1.5 text-sm ${
+                          entry.valid ? '' : 'text-destructive'
+                        } ${idx > 0 ? 'border-t border-border/10' : ''}`}
+                      >
+                        <span className="truncate flex-1 font-mono text-xs">{entry.url}</span>
+                        {entry.valid ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 text-success flex-shrink-0" />
+                        ) : (
+                          <AlertCircle className="h-3.5 w-3.5 text-destructive flex-shrink-0" />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <Button
+                  onClick={handleStartBatch}
+                  disabled={batchValidCount === 0}
+                  className="w-full bg-primary text-background hover:bg-primary/90"
+                >
+                  <Play className="h-4 w-4 mr-2" />
+                  Start batch ({batchValidCount})
+                </Button>
+              </div>
+            )}
+
+            {youtubeSubTab === 'batch' && (batchIsProcessing || batchIsFinished) && (
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <div className="flex justify-between text-sm">
+                    <span className="font-medium">
+                      {batchStatus === 'idle' && batchIsFinished
+                        ? 'Batch cancelled'
+                        : batchIsFinished
+                        ? 'Batch complete'
+                        : 'Processing batch'}
+                    </span>
+                    <span className="text-muted-foreground">
+                      {batchCompleted} / {batchItems.length} · {batchFailed} failed
+                    </span>
+                  </div>
+                  <div className="w-full bg-secondary/10 rounded-full h-2">
+                    <div
+                      className="bg-primary h-2 rounded-full transition-all duration-300"
+                      style={{
+                        width: `${batchItems.length > 0 ? (batchCompleted / batchItems.length) * 100 : 0}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="border border-border/10 rounded-lg max-h-64 overflow-y-auto">
+                  {batchItems.length === 0 ? (
+                    <div className="p-4 text-sm text-muted-foreground text-center">
+                      Waiting for first item...
+                    </div>
+                  ) : (
+                    batchItems.map((item) => (
+                      <div
+                        key={item.index}
+                        className={`flex items-center gap-2 px-3 py-2 text-sm ${
+                          item.index > 0 ? 'border-t border-border/10' : ''
+                        }`}
+                      >
+                        <BatchItemStatusIcon status={item.status} />
+                        <div className="flex-1 min-w-0">
+                          <p className="truncate font-mono text-xs">{item.url}</p>
+                          {item.error && (
+                            <p className="text-xs text-destructive truncate">{item.error}</p>
+                          )}
+                        </div>
+                        <span className="text-xs text-muted-foreground flex-shrink-0">
+                          {item.status === 'downloading' || item.status === 'transcribing'
+                            ? `${item.progress_percentage}%`
+                            : item.status}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {batchIsFinished && (
+                  <Button
+                    variant="outline"
+                    onClick={resetBatch}
+                    className="w-full"
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Clear queue
+                  </Button>
+                )}
+              </div>
+            )}
           </TabsContent>
         </Tabs>
 
@@ -646,10 +901,12 @@ export function ImportAudioDialog({
               >
                 {activeTab === 'upload' ? (
                   <Upload className="h-4 w-4 mr-2" />
+                ) : isBatchMode ? (
+                  <ListPlus className="h-4 w-4 mr-2" />
                 ) : (
                   <Youtube className="h-4 w-4 mr-2" />
                 )}
-                Import
+                {isBatchMode ? 'Start batch' : 'Import'}
               </Button>
             </>
           )}

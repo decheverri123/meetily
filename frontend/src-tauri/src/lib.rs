@@ -656,6 +656,15 @@ pub fn run() {
             api::api_save_transcript,
             api::open_meeting_folder,
             api::open_external_url,
+            // Folder commands
+            api::folders::api_get_folders,
+            api::folders::api_create_folder,
+            api::folders::api_rename_folder,
+            api::folders::api_delete_folder,
+            api::folders::api_assign_meeting_to_folder,
+            api::folders::api_ai_categorize_meeting,
+            api::folders::api_ai_categorize_all_meetings,
+            api::folders::api_get_meetings_with_folders,
             // Custom OpenAI commands
             api::api_save_custom_openai_config,
             api::api_get_custom_openai_config,
@@ -769,6 +778,10 @@ pub fn run() {
             audio::youtube_import::start_youtube_import_command,
             audio::youtube_import::cancel_youtube_import_command,
             audio::youtube_import::is_youtube_import_in_progress_command,
+            // YouTube batch import commands
+            audio::youtube_batch::start_youtube_batch_import_command,
+            audio::youtube_batch::cancel_youtube_batch_import_command,
+            audio::youtube_batch::get_youtube_batch_status_command,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
