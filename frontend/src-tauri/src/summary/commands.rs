@@ -1249,20 +1249,7 @@ fn ask_across_meetings_char_budget(budget_tokens: usize) -> usize {
     tokens_to_chars(budget_tokens).max(ASK_ACROSS_MEETINGS_CONTEXT_MIN_CHARS)
 }
 
-/// Scores how relevant a meeting's `summary` looks for `question`: the
-/// count of `question`'s significant words (see `question_relevance_terms`)
-/// that appear in `summary`, case-insensitively. Not real search relevance -
-/// no stemming, no ranking model, just simple substring matching - only
-/// precise enough to prefer an on-topic meeting over an unrelated one when
-/// `ask_across_meetings` has to drop meetings for budget reasons. Pure/sync.
-fn score_meeting_relevance(question: &str, summary: &str) -> usize {
-    let summary_lower = summary.to_lowercase();
-    question_relevance_terms(question)
-        .filter(|term| summary_lower.contains(term.as_str()))
-        .count()
-}
-
-/// Splits `question` into the lowercase words `score_meeting_relevance`
+/// Splits `question` into the lowercase words `count_matching_terms`
 /// matches against a summary: alphanumeric runs of at least 3 characters,
 /// so short filler words ("a", "to", "is") don't count as a match against
 /// every summary.
@@ -1273,13 +1260,28 @@ fn question_relevance_terms(question: &str) -> impl Iterator<Item = String> + '_
         .map(|w| w.to_lowercase())
 }
 
+/// Counts how many of `terms` (already split/lowercased by
+/// `question_relevance_terms`) appear in `text`, case-insensitively. Not
+/// real search relevance - no stemming, no ranking model, just simple
+/// substring matching - only precise enough to prefer an on-topic meeting
+/// over an unrelated one when `ask_across_meetings` has to drop meetings for
+/// budget reasons. Takes pre-split `terms` rather than the raw question so
+/// `order_meetings_by_relevance` can split `question` into terms once up
+/// front instead of re-parsing the same question for every meeting it scores
+/// - `question` can be up to `ASK_QUESTION_MAX_CHARS` and meeting counts are
+/// unbounded, so that per-meeting re-parsing isn't free. Pure/sync.
+fn count_matching_terms(terms: &[String], text: &str) -> usize {
+    let text_lower = text.to_lowercase();
+    terms.iter().filter(|term| text_lower.contains(term.as_str())).count()
+}
+
 /// Reorders `meetings` (as loaded by `ask_across_meetings`, most-recent-first)
 /// by relevance to `question` before they're handed to
 /// `build_cross_meeting_context`, which drops from the *end* of whatever
 /// order it's given once its budget runs out - so today's pure-recency order
 /// would always drop the oldest meetings even when an older one is the
-/// actual answer to the question. Sorts by descending
-/// `score_meeting_relevance`; `slice::sort_by`'s documented stability means
+/// actual answer to the question. Sorts by descending match count
+/// (`count_matching_terms`); `slice::sort_by`'s documented stability means
 /// meetings that score equally (most commonly: everyone scores 0, e.g. for a
 /// broad "summarize everything" question sharing no vocabulary with any
 /// summary) keep their original relative order, so this degrades exactly to
@@ -1289,10 +1291,11 @@ fn order_meetings_by_relevance(
     meetings: Vec<(String, String, Option<String>)>,
     question: &str,
 ) -> Vec<(String, String, Option<String>)> {
+    let terms: Vec<String> = question_relevance_terms(question).collect();
     let mut scored: Vec<(usize, (String, String, Option<String>))> = meetings
         .into_iter()
         .map(|meeting| {
-            let score = score_meeting_relevance(question, meeting.2.as_deref().unwrap_or(""));
+            let score = count_matching_terms(&terms, meeting.2.as_deref().unwrap_or(""));
             (score, meeting)
         })
         .collect();
@@ -1631,7 +1634,12 @@ mod ask_ai_tests {
         assert!(!context.contains("omitted"));
     }
 
-    // ---- score_meeting_relevance / order_meetings_by_relevance ----
+    // ---- count_matching_terms / order_meetings_by_relevance ----
+
+    fn score_meeting_relevance(question: &str, summary: &str) -> usize {
+        let terms: Vec<String> = question_relevance_terms(question).collect();
+        count_matching_terms(&terms, summary)
+    }
 
     #[test]
     fn score_meeting_relevance_zero_when_no_terms_match() {
