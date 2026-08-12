@@ -772,6 +772,10 @@ pub fn run() {
             audio::youtube_import::start_youtube_import_command,
             audio::youtube_import::cancel_youtube_import_command,
             audio::youtube_import::is_youtube_import_in_progress_command,
+            // YouTube batch import commands
+            audio::youtube_batch::start_youtube_batch_import_command,
+            audio::youtube_batch::cancel_youtube_batch_import_command,
+            audio::youtube_batch::get_youtube_batch_status_command,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
