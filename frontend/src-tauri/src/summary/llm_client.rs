@@ -31,6 +31,21 @@ pub struct ChatRequest {
 #[derive(Deserialize, Debug)]
 pub struct ChatResponse {
     pub choices: Vec<Choice>,
+    #[serde(default)]
+    pub usage: Option<ChatUsage>,
+}
+
+/// OpenAI-compatible usage block. Returned alongside `choices` by OpenAI, Groq,
+/// Ollama, OpenRouter, CustomOpenAI and LM Studio - `serde(default)` makes it
+/// optional so providers that omit it still parse.
+#[derive(Deserialize, Debug, Clone)]
+pub struct ChatUsage {
+    #[serde(default)]
+    pub prompt_tokens: i64,
+    #[serde(default)]
+    pub completion_tokens: i64,
+    #[serde(default)]
+    pub total_tokens: i64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -84,11 +99,21 @@ pub struct ClaudeRequest {
 #[derive(Deserialize, Debug)]
 pub struct ClaudeChatResponse {
     pub content: Vec<ClaudeChatContent>,
+    #[serde(default)]
+    pub usage: Option<ClaudeUsage>,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct ClaudeChatContent {
     pub text: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ClaudeUsage {
+    #[serde(default)]
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub output_tokens: i64,
 }
 
 /// LLM Provider enumeration for multi-provider support
@@ -104,7 +129,43 @@ pub enum LLMProvider {
     LmStudio,
 }
 
+/// Captured token usage for a single LLM call, returned alongside the
+/// generated text so callers can persist it without re-parsing the raw
+/// response. `None` for providers/clients that don't return usage.
+#[derive(Debug, Clone)]
+pub struct LLMUsage {
+    pub provider: LLMProvider,
+    pub model: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+}
+
+/// Result of a `generate_summary` call: the generated text plus optional
+/// usage telemetry. Callers should pattern-match `.summary` (always present
+/// on `Ok`) and optionally record `.usage`.
+#[derive(Debug)]
+pub struct GenerateSummaryOutput {
+    pub summary: String,
+    pub usage: Option<LLMUsage>,
+}
+
 impl LLMProvider {
+    /// String identifier used for persistence (token_usage row, pricing lookup).
+    /// Mirrors the `from_str` arms exactly so round-tripping is safe.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LLMProvider::OpenAI => "openai",
+            LLMProvider::Claude => "claude",
+            LLMProvider::Groq => "groq",
+            LLMProvider::Ollama => "ollama",
+            LLMProvider::OpenRouter => "openrouter",
+            LLMProvider::BuiltInAI => "builtin-ai",
+            LLMProvider::CustomOpenAI => "custom-openai",
+            LLMProvider::LmStudio => "lmstudio",
+        }
+    }
+
     /// Parse provider from string (case-insensitive)
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s.to_lowercase().as_str() {
@@ -160,7 +221,7 @@ pub async fn generate_summary(
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
     num_ctx: Option<u32>,
-) -> Result<String, String> {
+) -> Result<GenerateSummaryOutput, String> {
     // Check if cancelled before starting
     if let Some(token) = cancellation_token {
         if token.is_cancelled() {
@@ -173,7 +234,7 @@ pub async fn generate_summary(
         let app_data_dir = app_data_dir
             .ok_or_else(|| "app_data_dir is required for BuiltInAI provider".to_string())?;
 
-        return crate::summary::summary_engine::generate_with_builtin(
+        let summary = crate::summary::summary_engine::generate_with_builtin(
             app_data_dir,
             model_name,
             system_prompt,
@@ -181,7 +242,23 @@ pub async fn generate_summary(
             cancellation_token,
         )
         .await
-        .map_err(|e| e.to_string());
+        .map_err(|e| e.to_string())?;
+
+        let prompt_tokens = crate::summary::processor::rough_token_count(
+            &format!("{}{}", system_prompt, user_prompt),
+        ) as i64;
+        let completion_tokens = crate::summary::processor::rough_token_count(&summary) as i64;
+
+        return Ok(GenerateSummaryOutput {
+            summary,
+            usage: Some(LLMUsage {
+                provider: LLMProvider::BuiltInAI,
+                model: model_name.to_string(),
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+            }),
+        });
     }
 
     let (api_url, mut headers) = match provider {
@@ -380,8 +457,21 @@ pub async fn generate_summary(
             .ok_or("No content in LLM response")?
             .text
             .trim();
-        Ok(content.to_string())
+        let usage = chat_response.usage.as_ref().map(|u| LLMUsage {
+            provider: provider.clone(),
+            model: model_name.to_string(),
+            prompt_tokens: u.input_tokens,
+            completion_tokens: u.output_tokens,
+            total_tokens: u.input_tokens + u.output_tokens,
+        });
+        Ok(GenerateSummaryOutput {
+            summary: content.to_string(),
+            usage,
+        })
     } else if provider == &LLMProvider::Ollama {
+        // Ollama's native /api/chat doesn't always return usage; fine to
+        // emit `usage: None` here - the OpenAI-compat path below covers
+        // providers that do.
         let chat_response = response
             .json::<OllamaChatResponse>()
             .await
@@ -389,7 +479,10 @@ pub async fn generate_summary(
 
         info!("🐞 LLM Response received from {}", provider_name(provider));
 
-        Ok(chat_response.message.content.trim().to_string())
+        Ok(GenerateSummaryOutput {
+            summary: chat_response.message.content.trim().to_string(),
+            usage: None,
+        })
     } else {
         let chat_response = response
             .json::<ChatResponse>()
@@ -405,7 +498,17 @@ pub async fn generate_summary(
             .message
             .content
             .trim();
-        Ok(content.to_string())
+        let usage = chat_response.usage.as_ref().map(|u| LLMUsage {
+            provider: provider.clone(),
+            model: model_name.to_string(),
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+        });
+        Ok(GenerateSummaryOutput {
+            summary: content.to_string(),
+            usage,
+        })
     }
 }
 

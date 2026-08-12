@@ -9,10 +9,13 @@
 
 use super::loader::get_template;
 use super::types::{Template, TemplateSection};
+use crate::database::models::TokenUsagePurpose;
+use crate::database::token_usage_recorder::record_token_usage;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::summary::processor::chunk_text;
 use crate::summary::template_commands::TemplateInfo;
 use reqwest::Client;
+use sqlx::SqlitePool;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
@@ -49,6 +52,10 @@ pub struct TemplateSelectionContext<'a> {
     pub custom_openai_endpoint: Option<&'a str>,
     pub app_data_dir: Option<&'a PathBuf>,
     pub cancellation_token: Option<&'a CancellationToken>,
+    /// Optional meeting id used to attach the recorded token usage row to
+    /// the right meeting. `None` for callers that don't have a meeting
+    /// (e.g. ad-hoc / test paths).
+    pub meeting_id: Option<&'a str>,
 }
 
 /// Outcome of parsing the LLM's raw text response, before it has been
@@ -64,6 +71,7 @@ enum ParsedChoice {
 /// a single LLM call. Never fails: any error along the way falls back to the
 /// bundled `standard_meeting` template.
 pub async fn select_template(
+    pool: &SqlitePool,
     ctx: TemplateSelectionContext<'_>,
     transcript: &str,
     candidates: Vec<TemplateInfo>,
@@ -89,7 +97,17 @@ pub async fn select_template(
     )
     .await
     {
-        Ok(text) => text,
+        Ok(output) => {
+            if let Some(usage) = output.usage {
+                record_token_usage(
+                    pool.clone(),
+                    ctx.meeting_id.map(str::to_string),
+                    usage,
+                    TokenUsagePurpose::TemplateSelect,
+                );
+            }
+            output.summary
+        }
         Err(e) => {
             warn!(
                 "select_template: LLM call failed, falling back to '{}': {}",

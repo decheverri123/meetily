@@ -9,6 +9,8 @@ use crate::database::repositories::{
 };
 use crate::state::AppState;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
+use crate::database::models::TokenUsagePurpose;
+use crate::database::token_usage_recorder::record_token_usage;
 use crate::summary::processor::tokens_to_chars;
 use crate::summary::metadata::{
     read_default_template_from_metadata, read_detected_summary_language_from_metadata,
@@ -929,13 +931,16 @@ async fn resolve_ask_llm_plan<R: Runtime>(app: &AppHandle<R>) -> Result<AskLlmPl
 /// alone.
 async fn call_ask_llm_plan(
     plan: AskLlmPlan,
+    pool: sqlx::SqlitePool,
     system_prompt: &str,
     user_prompt: &str,
     ollama_num_ctx: Option<u32>,
+    meeting_id: Option<&str>,
+    purpose: TokenUsagePurpose,
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
 
-    let result: Result<String, String> = match plan {
+    let result: Result<crate::summary::llm_client::GenerateSummaryOutput, String> = match plan {
         AskLlmPlan::Builtin { model_name, app_data_dir } => {
             generate_summary(
                 &client,
@@ -976,10 +981,21 @@ async fn call_ask_llm_plan(
         }
     };
 
-    result.map_err(|e| {
+    let output = result.map_err(|e| {
         log_error!("call_ask_llm_plan: LLM provider call failed: {}", e);
         ASK_LLM_GENERIC_ERROR.to_string()
-    })
+    })?;
+
+    if let Some(usage) = output.usage {
+        record_token_usage(
+            pool,
+            meeting_id.map(str::to_string),
+            usage,
+            purpose,
+        );
+    }
+
+    Ok(output.summary)
 }
 
 /// Resolves the app's currently-configured LLM provider and calls it with
@@ -989,11 +1005,23 @@ async fn call_ask_llm_plan(
 /// call.
 async fn ask_configured_llm<R: Runtime>(
     app: &AppHandle<R>,
+    state: &tauri::State<'_, AppState>,
     system_prompt: &str,
     user_prompt: &str,
+    meeting_id: Option<&str>,
+    purpose: TokenUsagePurpose,
 ) -> Result<String, String> {
     let plan = resolve_ask_llm_plan(app).await?;
-    call_ask_llm_plan(plan, system_prompt, user_prompt, None).await
+    call_ask_llm_plan(
+        plan,
+        state.db_manager.pool().clone(),
+        system_prompt,
+        user_prompt,
+        None,
+        meeting_id,
+        purpose,
+    )
+    .await
 }
 
 /// Answers a free-text question about a single meeting, using its stored
@@ -1065,7 +1093,15 @@ pub async fn ask_about_meeting<R: Runtime>(
 
     let user_prompt = format!("{}\n\nQuestion: {}", context, question);
 
-    ask_configured_llm(&app, ASK_ABOUT_MEETING_SYSTEM_PROMPT, &user_prompt).await
+    ask_configured_llm(
+        &app,
+        &state,
+        ASK_ABOUT_MEETING_SYSTEM_PROMPT,
+        &user_prompt,
+        Some(&meeting_id),
+        TokenUsagePurpose::QaMeeting,
+    )
+    .await
 }
 
 /// Answers a free-text question about the meeting currently being recorded,
@@ -1080,6 +1116,7 @@ pub async fn ask_about_meeting<R: Runtime>(
 #[tauri::command]
 pub async fn ask_about_live_transcript<R: Runtime>(
     app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
     transcript: String,
     question: String,
 ) -> Result<String, String> {
@@ -1098,7 +1135,15 @@ pub async fn ask_about_live_transcript<R: Runtime>(
 
     let user_prompt = format!("{}\n\nQuestion: {}", context, question);
 
-    ask_configured_llm(&app, ASK_LIVE_TRANSCRIPT_SYSTEM_PROMPT, &user_prompt).await
+    ask_configured_llm(
+        &app,
+        &state,
+        ASK_LIVE_TRANSCRIPT_SYSTEM_PROMPT,
+        &user_prompt,
+        None,
+        TokenUsagePurpose::QaLive,
+    )
+    .await
 }
 
 /// Suggests questions worth asking about the meeting currently being
@@ -1109,6 +1154,7 @@ pub async fn ask_about_live_transcript<R: Runtime>(
 #[tauri::command]
 pub async fn suggest_live_transcript_questions<R: Runtime>(
     app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
     transcript: String,
 ) -> Result<String, String> {
     log_info!(
@@ -1122,7 +1168,15 @@ pub async fn suggest_live_transcript_questions<R: Runtime>(
             e
         })?;
 
-    ask_configured_llm(&app, SUGGEST_QUESTIONS_SYSTEM_PROMPT, &context).await
+    ask_configured_llm(
+        &app,
+        &state,
+        SUGGEST_QUESTIONS_SYSTEM_PROMPT,
+        &context,
+        None,
+        TokenUsagePurpose::SuggestQuestions,
+    )
+    .await
 }
 
 /// Suggests questions worth asking about a saved meeting, from the same
@@ -1175,7 +1229,15 @@ pub async fn suggest_meeting_questions<R: Runtime>(
         ASK_MEETING_CONTEXT_MAX_CHARS,
     );
 
-    ask_configured_llm(&app, SUGGEST_QUESTIONS_SYSTEM_PROMPT, &context).await
+    ask_configured_llm(
+        &app,
+        &state,
+        SUGGEST_QUESTIONS_SYSTEM_PROMPT,
+        &context,
+        Some(&meeting_id),
+        TokenUsagePurpose::SuggestQuestions,
+    )
+    .await
 }
 
 /// The resolved LLM context budget for `ask_across_meetings`'s prompt - a
@@ -1400,7 +1462,16 @@ pub async fn ask_across_meetings<R: Runtime>(
     let user_prompt = format!("{}\n\nQuestion: {}", context, question);
 
     let plan = plan_result?;
-    call_ask_llm_plan(plan, ASK_ACROSS_MEETINGS_SYSTEM_PROMPT, &user_prompt, ollama_num_ctx).await
+    call_ask_llm_plan(
+        plan,
+        pool.clone(),
+        ASK_ACROSS_MEETINGS_SYSTEM_PROMPT,
+        &user_prompt,
+        ollama_num_ctx,
+        None,
+        TokenUsagePurpose::QaGlobal,
+    )
+    .await
 }
 
 #[cfg(test)]

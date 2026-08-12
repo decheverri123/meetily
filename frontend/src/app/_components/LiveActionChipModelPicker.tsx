@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/command';
 import { useConfig } from '@/contexts/ConfigContext';
 import { cn } from '@/lib/utils';
+import { providerLabel } from '@/lib/providerLabels';
 import type { LiveActionChipModelOverride } from '@/hooks/useLiveActionChips';
 
 /**
@@ -30,15 +31,6 @@ import type { LiveActionChipModelOverride } from '@/hooks/useLiveActionChips';
  * model name is free text in Settings), which doesn't fit this compact picker.
  */
 type OverrideProvider = 'builtin-ai' | 'claude' | 'groq' | 'ollama' | 'openai' | 'openrouter';
-
-const PROVIDER_LABELS: Record<OverrideProvider, string> = {
-  'builtin-ai': 'Built-in AI',
-  claude: 'Claude',
-  groq: 'Groq',
-  ollama: 'Ollama',
-  openai: 'OpenAI',
-  openrouter: 'OpenRouter',
-};
 
 /** Providers that require a saved key, checked against `useConfig().providerApiKeys`. */
 type KeyedProvider = 'claude' | 'groq' | 'openai' | 'openrouter';
@@ -54,7 +46,14 @@ const KEYED_PROVIDERS: KeyedProvider[] = ['claude', 'groq', 'openai', 'openroute
 // `LiveActionChipModelOverride.provider` is a plain `string` (it mirrors the
 // Rust-side invoke arg, which accepts any provider id), so narrowing it back
 // to `OverrideProvider` needs a runtime check rather than an `as` cast.
-const OVERRIDE_PROVIDERS = Object.keys(PROVIDER_LABELS) as OverrideProvider[];
+const OVERRIDE_PROVIDERS: OverrideProvider[] = [
+  'builtin-ai',
+  'claude',
+  'groq',
+  'ollama',
+  'openai',
+  'openrouter',
+];
 
 function isOverrideProvider(value: string): value is OverrideProvider {
   return (OVERRIDE_PROVIDERS as string[]).includes(value);
@@ -62,16 +61,6 @@ function isOverrideProvider(value: string): value is OverrideProvider {
 
 function isKeyedProvider(provider: OverrideProvider): provider is KeyedProvider {
   return (KEYED_PROVIDERS as OverrideProvider[]).includes(provider);
-}
-
-/**
- * Falls back to the raw string for a provider id outside the known set (e.g.
- * a stale/foreign override, or 'custom-openai', which is a valid Settings
- * default but excluded from `OverrideProvider` - see note above).
- * Exported for reuse by `LiveProviderIndicator`.
- */
-export function providerLabel(provider: string): string {
-  return isOverrideProvider(provider) ? PROVIDER_LABELS[provider] : provider;
 }
 
 /** "<Provider> · <model>" footer label shared by the live and saved-meeting ask panels. */
@@ -217,7 +206,7 @@ export function LiveActionChipModelPicker({ override, onOverrideChange }: LiveAc
           <SelectContent>
             {availableProviders.map(provider => (
               <SelectItem key={provider} value={provider}>
-                {PROVIDER_LABELS[provider]}
+                {providerLabel(provider)}
               </SelectItem>
             ))}
           </SelectContent>

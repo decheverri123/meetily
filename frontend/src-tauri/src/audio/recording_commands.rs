@@ -42,6 +42,9 @@ use crate::summary::summary_engine::{
     ModelManagerState,
 };
 use crate::summary::llm_client::{generate_summary, provider_name, LLMProvider};
+use crate::database::models::TokenUsagePurpose;
+use crate::database::token_usage_recorder::record_token_usage;
+use crate::state::AppState;
 
 // ============================================================================
 // GLOBAL STATE
@@ -1782,7 +1785,14 @@ pub async fn generate_live_insights(app: tauri::AppHandle) -> Result<String, Str
         .ok_or_else(|| LIVE_INSIGHTS_IN_PROGRESS_ERROR.to_string())?;
     commit_rate_limit_slot(&LIVE_INSIGHTS_LAST_CALL);
 
-    generate_bounded_live_llm_text(&app, LIVE_INSIGHTS_SYSTEM_PROMPT, None, None).await
+    generate_bounded_live_llm_text(
+        &app,
+        LIVE_INSIGHTS_SYSTEM_PROMPT,
+        None,
+        None,
+        TokenUsagePurpose::LiveInsights,
+    )
+    .await
 }
 
 /// Shared implementation behind both `generate_live_insights` and
@@ -1829,6 +1839,7 @@ async fn generate_bounded_live_llm_text(
     system_prompt: &str,
     provider_override: Option<&str>,
     model_name_override: Option<&str>,
+    purpose: TokenUsagePurpose,
 ) -> Result<String, String> {
     let segments = {
         let manager_guard = RECORDING_MANAGER.lock().unwrap();
@@ -2027,18 +2038,41 @@ async fn generate_bounded_live_llm_text(
     });
 
     let result: Result<String, String> = match plan {
-        Plan::Builtin { model_name } => generate_with_builtin(
-            &app_data_dir,
-            &model_name,
-            system_prompt,
-            &user_prompt,
-            Some(&cancellation_token),
-        )
-        .await
-        .map_err(|e| e.to_string()),
+        Plan::Builtin { model_name } => {
+            let response = generate_with_builtin(
+                &app_data_dir,
+                &model_name,
+                system_prompt,
+                &user_prompt,
+                Some(&cancellation_token),
+            )
+            .await
+            .map_err(|e| e.to_string());
+            if let Ok(ref text) = response {
+                if let Some(pool) = app.try_state::<AppState>().map(|s| s.db_manager.pool().clone()) {
+                    let combined_prompt = format!("{system_prompt}\n{user_prompt}");
+                    let prompt_tokens =
+                        crate::summary::rough_token_count(&combined_prompt) as i64;
+                    let completion_tokens = crate::summary::rough_token_count(text) as i64;
+                    record_token_usage(
+                        pool,
+                        None,
+                        crate::summary::llm_client::LLMUsage {
+                            provider: LLMProvider::BuiltInAI,
+                            model: model_name.clone(),
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens: prompt_tokens + completion_tokens,
+                        },
+                        purpose,
+                    );
+                }
+            }
+            response
+        }
         Plan::Provider(invocation) => {
             let client = reqwest::Client::new();
-            generate_summary(
+            match generate_summary(
                 &client,
                 &invocation.provider,
                 &invocation.model_name,
@@ -2055,6 +2089,19 @@ async fn generate_bounded_live_llm_text(
                 None,
             )
             .await
+            {
+                Ok(output) => {
+                    if let Some(usage) = output.usage {
+                        if let Some(pool) =
+                            app.try_state::<AppState>().map(|s| s.db_manager.pool().clone())
+                        {
+                            record_token_usage(pool, None, usage, purpose);
+                        }
+                    }
+                    Ok(output.summary)
+                }
+                Err(e) => Err(e),
+            }
         }
     };
 
@@ -2205,8 +2252,14 @@ pub async fn generate_live_action_chip(
         .ok_or_else(|| LIVE_INSIGHTS_IN_PROGRESS_ERROR.to_string())?;
     commit_rate_limit_slot(last_call);
 
-    generate_bounded_live_llm_text(&app, system_prompt, provider.as_deref(), model_name.as_deref())
-        .await
+    generate_bounded_live_llm_text(
+        &app,
+        system_prompt,
+        provider.as_deref(),
+        model_name.as_deref(),
+        TokenUsagePurpose::LiveActionChip,
+    )
+    .await
 }
 
 #[cfg(test)]

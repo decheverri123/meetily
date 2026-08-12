@@ -19,6 +19,7 @@ pub struct ModelMetadata {
 /// Response structure from Ollama /api/show endpoint
 #[derive(Debug, Deserialize)]
 struct OllamaShowResponse {
+    #[serde(default)]
     modelfile: String,
     #[serde(default)]
     details: ModelDetails,

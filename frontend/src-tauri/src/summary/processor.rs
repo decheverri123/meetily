@@ -1,8 +1,11 @@
+use crate::database::models::TokenUsagePurpose;
+use crate::database::token_usage_recorder::record_token_usage;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::summary::templates::Template;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::Client;
+use sqlx::SqlitePool;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -334,6 +337,8 @@ pub fn extract_meeting_name_from_markdown(markdown: &str) -> Option<String> {
 /// where english_summary_markdown is the canonical AI-generated English summary
 /// (equals final_summary_markdown when target language is English)
 pub async fn generate_meeting_summary(
+    pool: &SqlitePool,
+    meeting_id: &str,
     client: &Client,
     provider: &LLMProvider,
     model_name: &str,
@@ -430,8 +435,16 @@ pub async fn generate_meeting_summary(
                 )
                 .await
                 {
-                    Ok(summary) => {
-                        chunk_summaries.push(summary);
+                    Ok(output) => {
+                        if let Some(usage) = output.usage {
+                            record_token_usage(
+                                pool.clone(),
+                                Some(meeting_id.to_string()),
+                                usage,
+                                TokenUsagePurpose::SummaryChunk,
+                            );
+                        }
+                        chunk_summaries.push(output.summary);
                         info!("✓ Chunk {}/{} processed successfully", i + 1, num_chunks);
                     }
                     Err(e) => {
@@ -466,7 +479,7 @@ pub async fn generate_meeting_summary(
                 let combined_text = chunk_summaries.join("\n---\n");
                 let system_prompt_combine = "You are an expert at synthesizing meeting summaries.";
                 let user_prompt_combine = build_combine_summary_user_prompt(&combined_text);
-                generate_summary(
+                let combine_output = generate_summary(
                     client,
                     provider,
                     model_name,
@@ -482,7 +495,16 @@ pub async fn generate_meeting_summary(
                     cancellation_token,
                     None,
                 )
-                .await?
+                .await?;
+                if let Some(usage) = combine_output.usage {
+                    record_token_usage(
+                        pool.clone(),
+                        Some(meeting_id.to_string()),
+                        usage,
+                        TokenUsagePurpose::SummaryCombine,
+                    );
+                }
+                combine_output.summary
             } else {
                 chunk_summaries.remove(0)
             };
@@ -515,7 +537,7 @@ pub async fn generate_meeting_summary(
             }
         }
 
-        let raw_markdown = generate_summary(
+        let final_output = generate_summary(
             client,
             provider,
             model_name,
@@ -532,6 +554,15 @@ pub async fn generate_meeting_summary(
             None,
         )
         .await?;
+        if let Some(usage) = final_output.usage {
+            record_token_usage(
+                pool.clone(),
+                Some(meeting_id.to_string()),
+                usage,
+                TokenUsagePurpose::SummaryFinal,
+            );
+        }
+        let raw_markdown = final_output.summary;
 
         let english_markdown = clean_llm_markdown_output(&raw_markdown);
         info!("Summary pass completed ({} chars)", english_markdown.len());
@@ -542,6 +573,8 @@ pub async fn generate_meeting_summary(
     let final_markdown = match resolve_final_language_action(summary_language, detected_transcript_language) {
         FinalLanguageAction::Translate(name) => {
             match translate_markdown(
+                pool,
+                meeting_id,
                 client,
                 provider,
                 model_name,
@@ -570,6 +603,8 @@ pub async fn generate_meeting_summary(
             let normalized = english_markdown_after_normalization_result(
                 &english_markdown,
                 normalize_markdown_to_english(
+                    pool,
+                    meeting_id,
                     client,
                     provider,
                     model_name,
@@ -597,6 +632,8 @@ pub async fn generate_meeting_summary(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_markdown_transform(
+    pool: &SqlitePool,
+    meeting_id: &str,
     client: &Client,
     provider: &LLMProvider,
     model_name: &str,
@@ -604,6 +641,7 @@ async fn run_markdown_transform(
     system_prompt: &str,
     user_prompt: &str,
     failure_label: &str,
+    purpose: TokenUsagePurpose,
     ollama_endpoint: Option<&str>,
     custom_openai_endpoint: Option<&str>,
     max_tokens: Option<u32>,
@@ -618,7 +656,7 @@ async fn run_markdown_transform(
         }
     }
 
-    let raw = generate_summary(
+    let output = generate_summary(
         client,
         provider,
         model_name,
@@ -637,11 +675,22 @@ async fn run_markdown_transform(
     .await
     .map_err(|e| format!("{failure_label} failed: {e}"))?;
 
-    Ok(clean_llm_markdown_output(&raw))
+    if let Some(usage) = output.usage {
+        record_token_usage(
+            pool.clone(),
+            Some(meeting_id.to_string()),
+            usage,
+            purpose,
+        );
+    }
+
+    Ok(clean_llm_markdown_output(&output.summary))
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn translate_markdown(
+    pool: &SqlitePool,
+    meeting_id: &str,
     client: &Client,
     provider: &LLMProvider,
     model_name: &str,
@@ -664,6 +713,8 @@ async fn translate_markdown(
     );
 
     run_markdown_transform(
+        pool,
+        meeting_id,
         client,
         provider,
         model_name,
@@ -671,6 +722,7 @@ async fn translate_markdown(
         &system_prompt,
         &user_prompt,
         "Translation pass",
+        TokenUsagePurpose::Translate,
         ollama_endpoint,
         custom_openai_endpoint,
         max_tokens,
@@ -684,6 +736,8 @@ async fn translate_markdown(
 
 #[allow(clippy::too_many_arguments)]
 async fn normalize_markdown_to_english(
+    pool: &SqlitePool,
+    meeting_id: &str,
     client: &Client,
     provider: &LLMProvider,
     model_name: &str,
@@ -704,6 +758,8 @@ async fn normalize_markdown_to_english(
     );
 
     run_markdown_transform(
+        pool,
+        meeting_id,
         client,
         provider,
         model_name,
@@ -711,6 +767,7 @@ async fn normalize_markdown_to_english(
         english_normalization_system_prompt(),
         &user_prompt,
         "English normalization pass",
+        TokenUsagePurpose::Normalize,
         ollama_endpoint,
         custom_openai_endpoint,
         max_tokens,

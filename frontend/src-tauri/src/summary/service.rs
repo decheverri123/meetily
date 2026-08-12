@@ -638,8 +638,9 @@ impl SummaryService {
                     custom_openai_endpoint: custom_openai_endpoint.as_deref(),
                     app_data_dir: app_data_dir.as_ref(),
                     cancellation_token: Some(&cancellation_token),
+                    meeting_id: Some(&meeting_id),
                 };
-                templates::select_template(selection_ctx, &text, candidates).await
+                templates::select_template(&pool, selection_ctx, &text, candidates).await
             }
             TemplateResolutionPlan::UseTemplateId => match templates::get_template(&template_id) {
                 Ok(template) => templates::TemplateChoice {
@@ -703,6 +704,8 @@ impl SummaryService {
         };
 
         let result = generate_meeting_summary(
+            &pool,
+            &meeting_id,
             &client,
             &provider,
             &model_name,

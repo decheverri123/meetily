@@ -131,3 +131,144 @@ pub struct TranscriptSetting {
     #[serde(rename = "openaiApiKey")]
     pub openai_api_key: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenUsagePurpose {
+    SummaryChunk,
+    SummaryCombine,
+    SummaryFinal,
+    TemplateSelect,
+    QaMeeting,
+    QaGlobal,
+    QaLive,
+    SuggestQuestions,
+    LiveInsights,
+    LiveActionChip,
+    Normalize,
+    Translate,
+    Other,
+}
+
+impl TokenUsagePurpose {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TokenUsagePurpose::SummaryChunk => "summary_chunk",
+            TokenUsagePurpose::SummaryCombine => "summary_combine",
+            TokenUsagePurpose::SummaryFinal => "summary_final",
+            TokenUsagePurpose::TemplateSelect => "template_select",
+            TokenUsagePurpose::QaMeeting => "qa_meeting",
+            TokenUsagePurpose::QaGlobal => "qa_global",
+            TokenUsagePurpose::QaLive => "qa_live",
+            TokenUsagePurpose::SuggestQuestions => "suggest_questions",
+            TokenUsagePurpose::LiveInsights => "live_insights",
+            TokenUsagePurpose::LiveActionChip => "live_action_chip",
+            TokenUsagePurpose::Normalize => "normalize",
+            TokenUsagePurpose::Translate => "translate",
+            TokenUsagePurpose::Other => "other",
+        }
+    }
+}
+
+impl From<TokenUsagePurpose> for String {
+    fn from(purpose: TokenUsagePurpose) -> Self {
+        purpose.as_str().to_string()
+    }
+}
+
+impl TryFrom<&str> for TokenUsagePurpose {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "summary_chunk" => Ok(TokenUsagePurpose::SummaryChunk),
+            "summary_combine" => Ok(TokenUsagePurpose::SummaryCombine),
+            "summary_final" => Ok(TokenUsagePurpose::SummaryFinal),
+            "template_select" => Ok(TokenUsagePurpose::TemplateSelect),
+            "qa_meeting" => Ok(TokenUsagePurpose::QaMeeting),
+            "qa_global" => Ok(TokenUsagePurpose::QaGlobal),
+            "qa_live" => Ok(TokenUsagePurpose::QaLive),
+            "suggest_questions" => Ok(TokenUsagePurpose::SuggestQuestions),
+            "live_insights" => Ok(TokenUsagePurpose::LiveInsights),
+            "live_action_chip" => Ok(TokenUsagePurpose::LiveActionChip),
+            "normalize" => Ok(TokenUsagePurpose::Normalize),
+            "translate" => Ok(TokenUsagePurpose::Translate),
+            "other" => Ok(TokenUsagePurpose::Other),
+            other => Err(format!("Unknown token usage purpose: {}", other)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    pub id: i64,
+    pub meeting_id: Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub estimated_cost_usd: Option<f64>,
+    pub purpose: String,
+    pub created_at: DateTime<Utc>,
+    pub metadata: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageQueryOpts {
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub purpose: Option<String>,
+    pub meeting_id: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelAggregate {
+    pub provider: String,
+    pub model: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub call_count: i64,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeBucketAggregate {
+    #[serde(rename = "bucketStart")]
+    pub bucket_start: DateTime<Utc>,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub call_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TimeBucket {
+    Hour,
+    Day,
+    Month,
+}
+
+impl TimeBucket {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TimeBucket::Hour => "hour",
+            TimeBucket::Day => "day",
+            TimeBucket::Month => "month",
+        }
+    }
+}
+
+impl std::fmt::Display for TimeBucket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
