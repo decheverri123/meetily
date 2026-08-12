@@ -608,7 +608,6 @@ async fn run_youtube_import<R: Runtime>(
             "source_url": url,
             "video_title": resolved_title,
             "channel": channel,
-            "default_template": "youtube_summary",
         })),
     ) {
         warn!("Failed to write metadata.json: {}", e);

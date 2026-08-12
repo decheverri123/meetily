@@ -64,6 +64,68 @@
   animation: fade-in-up 0.5s ease-out forwards;
 }
 
+@keyframes magic-cue-glow {
+  0% {
+    background-position: 0% 50%;
+    box-shadow: 0 0 12px 1px rgba(56, 189, 248, 0.4), 0 0 24px 2px rgba(168, 85, 247, 0.25);
+    border-color: rgba(56, 189, 248, 0.6);
+  }
+  50% {
+    background-position: 100% 50%;
+    box-shadow: 0 0 20px 4px rgba(236, 72, 153, 0.5), 0 0 30px 6px rgba(168, 85, 247, 0.4);
+    border-color: rgba(236, 72, 153, 0.8);
+  }
+  100% {
+    background-position: 0% 50%;
+    box-shadow: 0 0 12px 1px rgba(56, 189, 248, 0.4), 0 0 24px 2px rgba(168, 85, 247, 0.25);
+    border-color: rgba(56, 189, 248, 0.6);
+  }
+}
+
+@keyframes magic-cue-appear {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.94);
+    filter: blur(4px);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.02);
+    filter: blur(0px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0px);
+  }
+}
+
+.magic-cue-chip {
+  position: relative;
+  animation: magic-cue-appear 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.magic-cue-chip::before {
+  content: '';
+  position: absolute;
+  inset: -1.5px;
+  border-radius: 9999px;
+  padding: 1.5px;
+  background: linear-gradient(
+    115deg,
+    rgba(56, 189, 248, 0.8),
+    rgba(168, 85, 247, 0.8),
+    rgba(236, 72, 153, 0.8),
+    rgba(56, 189, 248, 0.8)
+  );
+  background-size: 200% 200%;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: magic-cue-glow 3s ease infinite;
+}
+
 .delay-75 {
   animation-delay: 75ms;
 }

@@ -81,13 +81,19 @@ export function useSuggestedQuestions({
   argsRef.current = args;
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      setGenerated(null);
+      return;
+    }
 
     const cached = cache.get(cacheKey);
     if (cached) {
       setGenerated(cached);
       return;
     }
+
+    // Reset while loading new scope/refresh key if no cached value
+    setGenerated(null);
 
     let cancelled = false;
     invoke<string>(command, argsRef.current)

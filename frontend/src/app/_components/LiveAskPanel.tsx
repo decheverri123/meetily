@@ -77,10 +77,12 @@ export function LiveAskPanel({
     [transcripts]
   );
 
+  const { currentMeetingId } = useTranscripts();
+
   const suggestions = useSuggestedQuestions({
     command: 'suggest_live_transcript_questions',
     args: { transcript: transcriptText },
-    scope: 'live',
+    scope: currentMeetingId ? `live_${currentMeetingId}` : 'live',
     enabled: transcriptText.length >= MIN_CHARS_FOR_SUGGESTIONS,
     refreshKey: Math.floor(transcriptText.length / SUGGESTION_REFRESH_CHARS),
   });

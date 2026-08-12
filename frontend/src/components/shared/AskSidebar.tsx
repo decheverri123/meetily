@@ -249,13 +249,14 @@ export function AskSidebar({
               SUGGESTED
             </span>
             <div className="flex flex-wrap gap-2">
-              {suggestions.map(suggestion => (
+              {suggestions.map((suggestion, index) => (
                 <button
                   key={suggestion}
                   type="button"
                   onClick={() => ask(suggestion)}
                   disabled={isLoading || disabled}
-                  className="glass-pill px-3 py-1.5 text-xs text-foreground/75 transition-colors hover:bg-secondary/10 disabled:opacity-50"
+                  style={{ animationDelay: `${index * 120}ms` }}
+                  className="magic-cue-chip glass-pill px-3 py-1.5 text-xs text-foreground/90 transition-all hover:bg-secondary/15 hover:scale-[1.03] active:scale-[0.98] disabled:opacity-50"
                 >
                   {suggestion}
                 </button>

@@ -360,7 +360,6 @@ mod tests {
                 "source_url": "https://youtu.be/abc123",
                 "video_title": "My Video",
                 "channel": "Some Channel",
-                "default_template": "youtube_summary",
             })),
         );
         assert!(result.is_ok(), "write_import_metadata failed: {:?}", result);
@@ -376,6 +375,5 @@ mod tests {
         assert_eq!(parsed["source"], "youtube");
         assert_eq!(parsed["source_url"], "https://youtu.be/abc123");
         assert_eq!(parsed["channel"], "Some Channel");
-        assert_eq!(parsed["default_template"], "youtube_summary");
     }
 }
