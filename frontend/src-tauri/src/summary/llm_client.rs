@@ -289,7 +289,11 @@ pub async fn generate_summary(
                 }
             ],
             stream: false,
-            options: num_ctx.map(|n| OllamaOptions { num_ctx: n }),
+            // A 0 num_ctx is not a safe "no override" no-op to Ollama - it's
+            // an explicit request for a zero-token context window. Guard
+            // here too (not just at the resolve_ask_context_budget source)
+            // since this is the last stop before the wire request.
+            options: num_ctx.filter(|&n| n > 0).map(|n| OllamaOptions { num_ctx: n }),
         })
     } else {
         // For CustomOpenAI, apply optional parameters if provided
@@ -505,6 +509,107 @@ mod num_ctx_wire_format_tests {
         assert!(
             request_text.contains("\"options\":{\"num_ctx\":32768}"),
             "expected num_ctx nested under an \"options\" object, got: {}",
+            request_text
+        );
+    }
+
+    /// A non-200 response from Ollama's native `/api/chat` (e.g. model not
+    /// pulled, malformed request) must still be surfaced as an `Err`
+    /// carrying the response body, exactly like every other provider - the
+    /// endpoint switch must not have bypassed the shared
+    /// `!response.status().is_success()` error path for Ollama specifically.
+    #[tokio::test]
+    async fn generate_summary_ollama_non_200_response_surfaces_error_body() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let addr = listener.local_addr().unwrap();
+        let endpoint = format!("http://{}", addr);
+
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf).unwrap_or(0);
+
+            let body = r#"{"error":"model 'llama3' not found, try pulling it first"}"#;
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+
+        let client = reqwest::Client::new();
+        let result = generate_summary(
+            &client,
+            &LLMProvider::Ollama,
+            "llama3",
+            "",
+            "system",
+            "user",
+            Some(&endpoint),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        handle.join().expect("mock server thread panicked");
+
+        let err = result.expect_err("a 404 from Ollama must surface as an Err, not Ok");
+        assert!(
+            err.contains("not found"),
+            "expected the Ollama error body to be surfaced in the error message, got: {}",
+            err
+        );
+    }
+
+    /// `resolve_ask_context_budget` in `summary::commands` can (in a
+    /// metadata-quirk case - see its own regression test) resolve a raw
+    /// Ollama context window of 0 tokens and forward it unmodified into
+    /// `generate_summary`'s `num_ctx` argument. This test proves
+    /// `generate_summary` itself applies no floor/guard: `Some(0)` is sent
+    /// to Ollama's native endpoint as a literal `"options":{"num_ctx":0}`,
+    /// not omitted or clamped to a sane minimum. Per Ollama's llama.cpp
+    /// backend, requesting a 0-token context window is not a safe no-op;
+    /// there is no defense against it anywhere on this path.
+    #[tokio::test]
+    async fn generate_summary_ollama_sends_num_ctx_zero_verbatim_with_no_guard() {
+        let (endpoint, handle) =
+            capture_request(r#"{"model":"llama3","message":{"role":"assistant","content":"ok"},"done":true}"#);
+
+        let client = reqwest::Client::new();
+        let result = generate_summary(
+            &client,
+            &LLMProvider::Ollama,
+            "llama3",
+            "",
+            "system",
+            "user",
+            Some(&endpoint),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(0),
+        )
+        .await;
+
+        let request_text = handle.join().expect("mock server thread panicked");
+
+        assert!(result.is_ok(), "generate_summary should have succeeded against the mock server: {:?}", result);
+
+        assert!(
+            !request_text.contains("\"num_ctx\":0"),
+            "expected generate_summary to guard against a 0-token num_ctx (omit the options field or \
+             clamp to a sane minimum) rather than forwarding it verbatim to Ollama, got request body: {}",
             request_text
         );
     }

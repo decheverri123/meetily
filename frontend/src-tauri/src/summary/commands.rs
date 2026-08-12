@@ -1195,6 +1195,17 @@ struct AskContextBudget {
     budget_tokens: usize,
 }
 
+/// Floor below which an Ollama-reported `context_size` is treated as bogus
+/// metadata rather than a real (if unusually small) context window. Real
+/// models' advertised windows run from the low thousands up; this sits far
+/// below any of them so it only catches malformed/zeroed `model_info`
+/// (e.g. a literal `context_length: 0`), never a legitimate small-context
+/// model. `extract_context_from_model_info` (ollama::metadata) only
+/// recognizes its own `ULTIMATE_FALLBACK` sentinel as "not found", so a
+/// server-reported `0` sails through `fetch_model_info` unguarded - this is
+/// the backstop that catches it before it becomes `num_ctx: 0` on the wire.
+const MIN_SANE_OLLAMA_CONTEXT_TOKENS: usize = 100;
+
 /// Computes `plan`'s `AskContextBudget`. Every branch mirrors a fallback
 /// `process_transcript_background` already uses for the same provider - a
 /// metadata-fetch failure or unrecognized model name here degrades to that
@@ -1220,10 +1231,19 @@ async fn resolve_ask_context_budget(plan: &AskLlmPlan) -> AskContextBudget {
                 .get_or_fetch(&invocation.model_name, invocation.ollama_endpoint.as_deref())
                 .await
             {
-                Ok(metadata) => AskContextBudget {
-                    raw_context_tokens: Some(metadata.context_size as u32),
-                    budget_tokens: metadata.context_size.saturating_sub(300),
-                },
+                Ok(metadata) if metadata.context_size >= MIN_SANE_OLLAMA_CONTEXT_TOKENS => {
+                    AskContextBudget {
+                        raw_context_tokens: Some(metadata.context_size as u32),
+                        budget_tokens: metadata.context_size.saturating_sub(300),
+                    }
+                }
+                Ok(metadata) => {
+                    log_warn!(
+                        "resolve_ask_context_budget: Ollama reported an implausibly small context_size ({}) for {} - treating as unusable metadata. Using default 4000",
+                        metadata.context_size, invocation.model_name
+                    );
+                    AskContextBudget { raw_context_tokens: None, budget_tokens: 4000 }
+                }
                 Err(e) => {
                     log_warn!(
                         "resolve_ask_context_budget: failed to fetch Ollama context for {}: {}. Using default 4000",
@@ -1808,6 +1828,69 @@ mod ask_ai_tests {
              fails to resolve - these are two different failure surfaces with very different budgets",
             char_budget,
             ASK_ACROSS_MEETINGS_CONTEXT_MAX_CHARS
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_ask_context_budget_ollama_zero_context_length_forwards_zero_num_ctx() {
+        // Simulates an Ollama /api/show response whose model_info reports a
+        // literal context_length of 0 (e.g. a malformed or unusual model
+        // entry - see ollama::metadata::extract_context_from_model_info,
+        // which only treats the ULTIMATE_FALLBACK sentinel of 4000 as "not
+        // found", not 0). resolve_ask_context_budget must not let a raw
+        // context window of 0 propagate through to `raw_context_tokens`,
+        // because that value is forwarded verbatim as `num_ctx` on the real
+        // Ollama call (see AskContextBudget::raw_context_tokens doc comment
+        // above and call_ask_llm_plan/generate_summary) - sending
+        // `"options":{"num_ctx":0}` to Ollama's native /api/chat is not a
+        // safe "no override" no-op, it's an explicit (and almost certainly
+        // broken) request for a zero-token context window.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock /api/show server");
+        let addr = listener.local_addr().unwrap();
+        let endpoint = format!("http://{}", addr);
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let _ = String::from_utf8_lossy(&buf[..n]);
+
+            let body = r#"{"modelfile":"FROM llama3","details":{"family":"llama","parameter_size":"1B"},"model_info":{"context_length":0}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+
+        let plan = AskLlmPlan::Provider(LiveLlmProviderInvocation {
+            provider: LLMProvider::Ollama,
+            model_name: "llama3".to_string(),
+            api_key: String::new(),
+            ollama_endpoint: Some(endpoint),
+            custom_openai_endpoint: None,
+            custom_openai_max_tokens: None,
+            custom_openai_temperature: None,
+            custom_openai_top_p: None,
+        });
+        let budget = resolve_ask_context_budget(&plan).await;
+        handle.join().expect("mock server thread panicked");
+
+        assert!(
+            budget.raw_context_tokens.map_or(true, |n| n > 0),
+            "resolve_ask_context_budget produced raw_context_tokens={:?} for a model reporting a              0-token context window - this value is forwarded verbatim as Ollama's num_ctx, so it              must never be Some(0); expected None (fall back like any other metadata quirk) or a              clamped positive minimum, got {:?}",
+            budget.raw_context_tokens,
+            budget.raw_context_tokens
         );
     }
 
