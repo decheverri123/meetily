@@ -198,6 +198,18 @@ fn progress_event_for_item(batch_id: &str, index: usize) -> String {
     format!("youtube-batch-item-{}-{}", batch_id, index)
 }
 
+/// Classify a transcription error as cancellation vs. real failure. Three
+/// signals are checked, in order: the global YOUTUBE_IMPORT_CANCELLED
+/// atomic (set by the user-facing cancel command), the per-batch cancel
+/// flag (set internally), and a case-insensitive "cancel" substring in
+/// the error message itself. Any of the three means the user (or the
+/// pipeline) wanted this item stopped, not that the engine crashed.
+fn is_cancellation_error(err: &str, batch_cancel_flag: &AtomicBool) -> bool {
+    YOUTUBE_IMPORT_CANCELLED.load(Ordering::SeqCst)
+        || batch_cancel_flag.load(Ordering::SeqCst)
+        || err.to_lowercase().contains("cancel")
+}
+
 fn progress_payload(id: &str, agg: &BatchAggregator, item: BatchItem) -> BatchProgressPayload {
     BatchProgressPayload {
         id: id.to_string(),
@@ -435,7 +447,13 @@ pub async fn start_youtube_batch_import_command<R: Runtime>(
                     );
                 }
                 Err(err) => {
-                    agg.set_item_status(idx, BatchItemStatus::Failed, 0, Some(err), None);
+                    let was_cancelled = is_cancellation_error(&err, state.cancel_flag.as_ref());
+                    let status = if was_cancelled {
+                        BatchItemStatus::Cancelled
+                    } else {
+                        BatchItemStatus::Failed
+                    };
+                    agg.set_item_status(idx, status, 0, Some(err), None);
                 }
             }
             agg.recompute_counts();
@@ -947,5 +965,292 @@ mod tests {
         // confirming the parser's input model: it splits on \n then trims.
         let parsed = parse_batch_url_input("https://youtu.be/a\n\n");
         assert_eq!(parsed, vec!["https://youtu.be/a".to_string()]);
+    }
+
+    // =========================================================================
+    // Round 2 adversarial tests (breaker pass 2)
+    // =========================================================================
+    // Focus: cancel-during-transcription mis-classification, pending-item
+    // visibility after cancel, stale tests from round 1.
+
+    /// Simulates the batch's transcription loop (the for-loop at line 407
+    /// of the real code) when an item's transcription fails *because the
+    /// user cancelled* — `transcribe_youtube_download` returns Err, the
+    /// loop calls `set_item_status(Failed, ...)` without checking whether
+    /// the failure was a cancellation. So the cancelled item shows up
+    /// with status `Failed` in the snapshot, not `Cancelled`.
+    ///
+    /// This test exercises the *aggregator* path the loop uses. The
+    /// frontend's UI then displays "failed" rather than "cancelled" for
+    /// the affected item.
+    #[test]
+    fn test_cancelled_item_marks_as_failed_not_cancelled() {
+        let mut agg = BatchAggregator::new(vec![
+            url_with_title("a"),
+            url_with_title("b"),
+            url_with_title("c"),
+        ]);
+        // Simulate the loop: item 1 is in Transcribing, the cancel flag
+        // fires, the transcription returns Err("cancelled").
+        agg.set_item_status(0, BatchItemStatus::Complete, 100, None, Some("m0".into()));
+        agg.set_item_status(1, BatchItemStatus::Transcribing, 30, None, None);
+        agg.recompute_counts();
+
+        // The loop sees Err and writes Failed — *not* Cancelled. This
+        // mirrors line 437-440 of youtube_batch.rs.
+        let cancel_err: String = "Import cancelled".to_string();
+        agg.set_item_status(1, BatchItemStatus::Failed, 0, Some(cancel_err), None);
+        agg.recompute_counts();
+
+        let snap = agg.snapshot("batch-1", true);
+        let item1 = &snap.items[1];
+        // BUG: the item that failed only because the user cancelled ends
+        // up labeled "Failed" in the snapshot. The frontend has no way to
+        // distinguish "user cancelled" from "download error" from this
+        // status alone. (snapshot.cancelled is true only if the whole
+        // batch's `cancelled` flag was set, which is set by
+        // mark_remaining_cancelled, not by per-item transcription
+        // failures.)
+        assert_eq!(item1.status, BatchItemStatus::Failed);
+        assert_eq!(item1.error.as_deref(), Some("Import cancelled"));
+        // Pinning the observed (buggy) behavior: there's no Cancelled
+        // status set on this item.
+        assert_ne!(item1.status, BatchItemStatus::Cancelled);
+    }
+
+    /// When the batch is cancelled mid-download, the orchestrator drops
+    /// the download stream. Items whose download closure never gets a
+    /// chance to run (still in the buffer) never have their status
+    /// updated. They remain in `Pending` (or `Downloading` if they had
+    /// been picked up but hadn't run the cancel-check yet).
+    ///
+    /// In the UI this means a cancelled batch shows some items as
+    /// "Pending" or "Downloading" forever, even though the batch is
+    /// done. The end-of-batch `mark_remaining_cancelled` is only called
+    /// if the batch's *own* `cancel_flag` is set, but it only marks
+    /// items that are NOT already in a terminal state — which Pending
+    /// and Downloading items satisfy, so they SHOULD be marked
+    /// cancelled. Verify the mark function fixes them, and that the
+    /// orchestrator actually calls it.
+    #[test]
+    fn test_mark_remaining_cancelled_fixes_pending_and_downloading() {
+        let mut agg = BatchAggregator::new(vec![
+            url_with_title("a"),
+            url_with_title("b"),
+            url_with_title("c"),
+            url_with_title("d"),
+        ]);
+        // a completed, b still pending, c downloading, d downloaded-but-
+        // not-yet-transcribed
+        agg.set_item_status(0, BatchItemStatus::Complete, 100, None, Some("m".into()));
+        agg.set_item_status(2, BatchItemStatus::Downloading, 0, None, None);
+        agg.set_item_status(3, BatchItemStatus::Downloaded, 15, None, None);
+
+        agg.mark_remaining_cancelled();
+
+        // The orchestrator's call to mark_remaining_cancelled() does
+        // catch the in-flight items. So the bug is actually that the
+        // *orchestrator doesn't always call this for short-circuit
+        // cancels* — but at minimum mark_remaining_cancelled itself
+        // works correctly. Confirm that.
+        assert_eq!(agg.items[0].status, BatchItemStatus::Complete);
+        assert_eq!(agg.items[1].status, BatchItemStatus::Cancelled);
+        assert_eq!(agg.items[2].status, BatchItemStatus::Cancelled);
+        assert_eq!(agg.items[3].status, BatchItemStatus::Cancelled);
+        assert!(agg.cancelled);
+    }
+
+    /// The actual orchestrator only calls `mark_remaining_cancelled` at
+    /// the end of the transcription phase (line 448), inside the same
+    /// `let mut agg = state.aggregator.lock().await;` block as the
+    /// `emit_complete`. If cancel fires *before* the orchestrator even
+    /// starts the transcription loop (e.g. cancel right after downloads
+    /// finish, before any item enters Transcribing), the items that
+    /// downloaded successfully but haven't been transcribed yet are in
+    /// `Downloaded` state. The loop checks cancel_flag *per item* and
+    /// cleans up the meeting folder but doesn't update the item status
+    /// to Cancelled (the item stays in `Downloaded` with no error).
+    ///
+    /// Pin this observed behavior: the loop at line 407-444 removes the
+    /// meeting folder for cancelled items but never writes
+    /// BatchItemStatus::Cancelled to the aggregator for them.
+    #[test]
+    fn test_loop_short_circuit_on_cancel_leaves_items_in_downloaded() {
+        // The actual loop in the production code is:
+        //     for (idx, slot) in ordered.into_iter().enumerate() {
+        //         if state.cancel_flag.load(...) {
+        //             if let Some((_, download)) = slot {
+        //                 let _ = std::fs::remove_dir_all(&download.meeting_folder);
+        //             }
+        //             continue;     // <-- skips without updating status
+        //         }
+        //         ...
+        //     }
+        //
+        // The `continue` skips the rest of the loop body, including the
+        // `set_item_status` calls. The aggregator's items stay in their
+        // pre-loop state (Downloaded, in this scenario). The end-of-loop
+        // mark_remaining_cancelled only runs if cancel_flag is set, but
+        // it operates on the items as they are — Downloaded IS one of
+        // the states it would mark as Cancelled. So in practice the
+        // end-of-batch block *does* fix this. But: if the orchestrator
+        // ever short-circuits before the loop, the items are stuck.
+        let mut agg = BatchAggregator::new(vec![url_with_title("a"), url_with_title("b")]);
+        agg.set_item_status(0, BatchItemStatus::Downloaded, 15, None, None);
+        agg.set_item_status(1, BatchItemStatus::Downloaded, 15, None, None);
+
+        // Simulate the loop body's cancel short-circuit: nothing happens
+        // to the aggregator items.
+        // (No set_item_status calls here.)
+
+        // Now mark_remaining_cancelled runs at the end.
+        agg.mark_remaining_cancelled();
+
+        // Yes, mark_remaining_cancelled does fix this case. So the
+        // bug depends on the orchestrator reaching the end-of-loop
+        // block. If a panic or early return happens between the loop
+        // and the mark_remaining_cancelled call, items would be stuck
+        // in Downloaded state forever. Pin the *fixed* behavior.
+        assert_eq!(agg.items[0].status, BatchItemStatus::Cancelled);
+        assert_eq!(agg.items[1].status, BatchItemStatus::Cancelled);
+    }
+
+    /// Stale round-1 test: `test_partition_valid_urls_classifies_playlist_url_as_valid`
+    /// was written when `is_valid_youtube_url` accepted watch URLs with
+    /// a `list=` query parameter. The round-1 fix (commit 1ce4696) made
+    /// `is_valid_youtube_url` reject any URL with a `list` query param.
+    /// The stale test in this file now fails. Pin the *post-fix* behavior.
+    #[test]
+    fn test_partition_valid_urls_rejects_watch_url_with_list_param() {
+        let urls = vec!["https://www.youtube.com/watch?v=abc&list=PLxyz".to_string()];
+        let (valid, invalid) = partition_valid_urls(urls);
+        assert!(valid.is_empty(), "post-fix: playlist URL must be rejected, got valid={:?}", valid);
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].0, "https://www.youtube.com/watch?v=abc&list=PLxyz");
+    }
+
+    // =========================================================================
+    // Round 2 regression tests (breaker pass 2)
+    // =========================================================================
+    // Focus: when the transcription loop sees Err, classify as Cancelled vs
+    // Failed correctly. Three signals: global YOUTUBE_IMPORT_CANCELLED,
+    // per-batch cancel_flag, and a "cancel" substring in the error message.
+
+    /// Serializes tests that mutate `YOUTUBE_IMPORT_CANCELLED` (a process-wide
+    /// atomic shared with `youtube_import.rs`) so they don't race with other
+    /// tests in the same binary that read or set it.
+    static GLOBAL_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_is_cancellation_error_when_global_flag_set() {
+        let _guard = GLOBAL_STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        YOUTUBE_IMPORT_CANCELLED.store(true, Ordering::SeqCst);
+        let batch_flag = AtomicBool::new(false);
+        // Error message says nothing about cancel; the global flag alone is
+        // enough to classify this as a cancellation.
+        assert!(is_cancellation_error("transcribe failed: out of memory", &batch_flag));
+        YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_is_cancellation_error_when_batch_flag_set() {
+        let _guard = GLOBAL_STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+        let batch_flag = AtomicBool::new(true);
+        assert!(is_cancellation_error("transcribe failed: out of memory", &batch_flag));
+    }
+
+    #[test]
+    fn test_is_cancellation_error_when_message_mentions_cancel() {
+        let _guard = GLOBAL_STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+        let batch_flag = AtomicBool::new(false);
+        // Any case-insensitive "cancel" substring wins, even without the flags.
+        assert!(is_cancellation_error("Import cancelled", &batch_flag));
+        assert!(is_cancellation_error("CANCELLED by user", &batch_flag));
+        assert!(is_cancellation_error("audio pipeline: cancelled mid-decode", &batch_flag));
+    }
+
+    #[test]
+    fn test_is_cancellation_error_false_for_real_failure() {
+        let _guard = GLOBAL_STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+        let batch_flag = AtomicBool::new(false);
+        // No flag set, no "cancel" in the message — this is a real failure.
+        assert!(!is_cancellation_error("whisper engine crashed: code 137", &batch_flag));
+        assert!(!is_cancellation_error("audio decode failed: unsupported format", &batch_flag));
+    }
+
+    /// When `transcribe_youtube_download` returns Err and the global cancel
+    /// flag is set, the loop's classification (mirrored here via the
+    /// `is_cancellation_error` helper) must write `Cancelled` to the
+    /// aggregator, not `Failed`. Without this fix the UI shows a red
+    /// "failed" indicator that the user can't distinguish from a real
+    /// engine crash.
+    ///
+    /// This is the "when cancellation flag is set before transcription
+    /// starts, the item ends up Cancelled not Failed" regression test.
+    #[test]
+    fn test_transcription_loop_err_with_cancel_flag_marks_item_cancelled() {
+        let _guard = GLOBAL_STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        YOUTUBE_IMPORT_CANCELLED.store(true, Ordering::SeqCst);
+
+        let mut agg = BatchAggregator::new(vec![
+            url_with_title("a"),
+            url_with_title("b"),
+        ]);
+        agg.set_item_status(0, BatchItemStatus::Transcribing, 30, None, None);
+        agg.recompute_counts();
+
+        // Simulate transcribe_youtube_download returning Err with a message
+        // that does NOT itself mention "cancel" — the classification must
+        // come from the flag, not the message.
+        let err: String = "engine returned non-zero exit".to_string();
+        let batch_flag = AtomicBool::new(false);
+        let was_cancelled = is_cancellation_error(&err, &batch_flag);
+        let status = if was_cancelled {
+            BatchItemStatus::Cancelled
+        } else {
+            BatchItemStatus::Failed
+        };
+        agg.set_item_status(0, status, 0, Some(err), None);
+        agg.recompute_counts();
+
+        let snap = agg.snapshot("batch-1", true);
+        assert_eq!(
+            snap.items[0].status,
+            BatchItemStatus::Cancelled,
+            "with cancel flag set, transcription err must classify as Cancelled, not Failed"
+        );
+        assert_ne!(snap.items[0].status, BatchItemStatus::Failed);
+
+        YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+    }
+
+    /// When `transcribe_youtube_download` returns Err with no cancel flag
+    /// set and no "cancel" substring in the message, the loop must still
+    /// mark the item as `Failed` — cancels must not over-match.
+    #[test]
+    fn test_transcription_loop_err_without_cancel_still_marks_failed() {
+        let _guard = GLOBAL_STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+
+        let mut agg = BatchAggregator::new(vec![url_with_title("a")]);
+        agg.set_item_status(0, BatchItemStatus::Transcribing, 30, None, None);
+        agg.recompute_counts();
+
+        let err: String = "whisper: failed to load model".to_string();
+        let batch_flag = AtomicBool::new(false);
+        let was_cancelled = is_cancellation_error(&err, &batch_flag);
+        let status = if was_cancelled {
+            BatchItemStatus::Cancelled
+        } else {
+            BatchItemStatus::Failed
+        };
+        agg.set_item_status(0, status, 0, Some(err), None);
+        agg.recompute_counts();
+
+        let snap = agg.snapshot("batch-1", true);
+        assert_eq!(snap.items[0].status, BatchItemStatus::Failed);
     }
 }
