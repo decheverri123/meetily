@@ -112,7 +112,12 @@ pub(crate) async fn resolve_provider_context_budget(
                     model_name, metadata.context_size, optimal
                 );
                 ProviderContextBudget {
-                    raw_context_tokens: Some(metadata.context_size as u32),
+                    // Saturating, not `as u32`: a truncating cast on an
+                    // implausibly large reported context_size would wrap
+                    // around to a small/arbitrary value instead of clamping,
+                    // silently sending Ollama a wrong-but-plausible-looking
+                    // num_ctx rather than an obviously-too-large one.
+                    raw_context_tokens: Some(u32::try_from(metadata.context_size).unwrap_or(u32::MAX)),
                     budget_tokens: optimal,
                 }
             }
@@ -1256,5 +1261,58 @@ mod tests {
     fn test_extract_cached_english_from_malformed_json_errors() {
         let raw = r#"{ not valid json"#;
         assert!(extract_cached_english_markdown(raw, &sample_cache_source(), Some("de")).is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_context_budget_ollama_huge_context_size_does_not_wrap_via_truncating_cast() {
+        // metadata.context_size is usize; raw_context_tokens is u32. A value
+        // above u32::MAX (implausible for a real model, but not something the
+        // Ollama /api/show response format rules out) must saturate to
+        // u32::MAX rather than silently wrapping via `as u32` truncation into
+        // an arbitrary small-looking value that would then be sent as Ollama's
+        // num_ctx.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock /api/show server");
+        let addr = listener.local_addr().unwrap();
+        let endpoint = format!("http://{}", addr);
+
+        let huge: u64 = u32::MAX as u64 + 1_000_000;
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let _ = String::from_utf8_lossy(&buf[..n]);
+
+            let body = format!(
+                r#"{{"modelfile":"FROM llama3","details":{{"family":"llama","parameter_size":"1B"}},"model_info":{{"context_length":{}}}}}"#,
+                huge
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+
+        let budget =
+            resolve_provider_context_budget(&LLMProvider::Ollama, "llama3", Some(&endpoint)).await;
+        handle.join().expect("mock server thread panicked");
+
+        assert_eq!(
+            budget.raw_context_tokens,
+            Some(u32::MAX),
+            "context_size above u32::MAX must saturate to u32::MAX, not wrap around via a \
+             truncating cast, got {:?}",
+            budget.raw_context_tokens
+        );
     }
 }
