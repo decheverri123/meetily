@@ -85,6 +85,7 @@ pub async fn select_template(
         None,
         ctx.app_data_dir,
         ctx.cancellation_token,
+        None,
     )
     .await
     {

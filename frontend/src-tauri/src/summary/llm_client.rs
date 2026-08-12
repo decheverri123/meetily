@@ -25,6 +25,8 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_ctx: Option<u32>,
 }
 
 // Generic structure for OpenAI-compatible API chat responses
@@ -109,6 +111,11 @@ impl LLMProvider {
 /// * `top_p` - Optional top_p (for CustomOpenAI provider)
 /// * `app_data_dir` - Optional app data directory (for BuiltInAI provider)
 /// * `cancellation_token` - Optional token to cancel the request
+/// * `num_ctx` - Optional Ollama context window size (in tokens) to request
+///   via the `num_ctx` request field. Ollama-only: ignored for every other
+///   provider, since without it Ollama silently falls back to the model's
+///   own (often much smaller) default context rather than the resolved
+///   window the caller actually sized its prompt against.
 ///
 /// # Returns
 /// The generated summary text or an error message
@@ -126,6 +133,7 @@ pub async fn generate_summary(
     top_p: Option<f32>,
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
+    num_ctx: Option<u32>,
 ) -> Result<String, String> {
     // Check if cancelled before starting
     if let Some(token) = cancellation_token {
@@ -235,6 +243,7 @@ pub async fn generate_summary(
         } else {
             (None, None, None)
         };
+        let num_ctx_val = if provider == &LLMProvider::Ollama { num_ctx } else { None };
 
         serde_json::json!(ChatRequest {
             model: model_name.to_string(),
@@ -251,6 +260,7 @@ pub async fn generate_summary(
             max_tokens: max_tokens_val,
             temperature: temperature_val,
             top_p: top_p_val,
+            num_ctx: num_ctx_val,
         })
     } else {
         serde_json::json!(ClaudeRequest {

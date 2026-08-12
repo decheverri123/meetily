@@ -21,8 +21,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use once_cell::sync::Lazy;
 
-// Global cache for model metadata (5 minute TTL)
-static METADATA_CACHE: Lazy<ModelMetadataCache> = Lazy::new(|| {
+// Global cache for model metadata (5 minute TTL). `pub(crate)` so
+// `summary::commands`'s `ask_across_meetings` context-budget resolution can
+// reuse this same cache/TTL instead of instantiating a second, independent
+// cache instance for the same Ollama endpoints.
+pub(crate) static METADATA_CACHE: Lazy<ModelMetadataCache> = Lazy::new(|| {
     ModelMetadataCache::new(Duration::from_secs(300))
 });
 

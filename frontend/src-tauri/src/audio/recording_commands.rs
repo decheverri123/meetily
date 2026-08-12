@@ -2052,6 +2052,7 @@ async fn generate_bounded_live_llm_text(
                 invocation.custom_openai_top_p,
                 Some(&app_data_dir),
                 Some(&cancellation_token),
+                None,
             )
             .await
         }

@@ -177,6 +177,17 @@ pub fn rough_token_count(s: &str) -> usize {
     (char_count as f64 * 0.35).ceil() as usize
 }
 
+/// Converts a token count to a Unicode-char budget using ~2.85 chars per
+/// token (the inverse of the 0.35 tokens-per-char `rough_token_count`
+/// estimates). Shared so every token->char conversion in the crate - this
+/// module's own `chunk_text` below, and `summary::commands`'s dynamic context
+/// budgeting for `ask_across_meetings` - uses the same ratio rather than each
+/// independently reinventing it.
+pub(crate) fn tokens_to_chars(tokens: usize) -> usize {
+    const CHARS_PER_TOKEN: f64 = 1.0 / 0.35;
+    (tokens as f64 * CHARS_PER_TOKEN).ceil() as usize
+}
+
 /// Chunks text into overlapping segments based on token count
 /// Uses character-based chunking for proper Unicode support
 ///
@@ -198,10 +209,8 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
     }
 
     // Convert token-based sizes to character-based sizes
-    // Using ~2.85 chars per token (inverse of 0.35 tokens per char from rough_token_count)
-    let chars_per_token = 1.0 / 0.35;
-    let chunk_size_chars = (chunk_size_tokens as f64 * chars_per_token).ceil() as usize;
-    let overlap_chars = (overlap_tokens as f64 * chars_per_token).ceil() as usize;
+    let chunk_size_chars = tokens_to_chars(chunk_size_tokens);
+    let overlap_chars = tokens_to_chars(overlap_tokens);
 
     // Collect characters for indexing (needed for proper Unicode support)
     let chars: Vec<char> = text.chars().collect();
@@ -417,6 +426,7 @@ pub async fn generate_meeting_summary(
                     top_p,
                     app_data_dir,
                     cancellation_token,
+                    None,
                 )
                 .await
                 {
@@ -470,6 +480,7 @@ pub async fn generate_meeting_summary(
                     top_p,
                     app_data_dir,
                     cancellation_token,
+                    None,
                 )
                 .await?
             } else {
@@ -518,6 +529,7 @@ pub async fn generate_meeting_summary(
             top_p,
             app_data_dir,
             cancellation_token,
+            None,
         )
         .await?;
 
@@ -620,6 +632,7 @@ async fn run_markdown_transform(
         top_p,
         app_data_dir,
         cancellation_token,
+        None,
     )
     .await
     .map_err(|e| format!("{failure_label} failed: {e}"))?;
@@ -712,6 +725,24 @@ async fn normalize_markdown_to_english(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokens_to_chars_uses_the_2_85_chars_per_token_ratio() {
+        // 1000 tokens / 0.35 tokens-per-char = 2857.14... -> ceil to 2858.
+        assert_eq!(tokens_to_chars(1000), 2858);
+    }
+
+    #[test]
+    fn tokens_to_chars_zero_tokens_is_zero_chars() {
+        assert_eq!(tokens_to_chars(0), 0);
+    }
+
+    #[test]
+    fn tokens_to_chars_rounds_up_rather_than_truncating() {
+        // 1 token / 0.35 = 2.857... - must round up to 3, not truncate to 2,
+        // so a caller sizing a budget from a token count never under-reserves.
+        assert_eq!(tokens_to_chars(1), 3);
+    }
 
     #[test]
     fn chunk_summary_prompt_forces_english_base_output() {

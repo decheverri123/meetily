@@ -1,6 +1,7 @@
 use crate::api::api::{api_get_custom_openai_config, api_get_model_config};
 use crate::audio::recording_commands::{
     resolve_effective_model_name, resolve_live_llm_provider, resolve_provider_invocation,
+    LiveLlmProviderInvocation,
 };
 use crate::database::repositories::{
     meeting::MeetingsRepository,
@@ -8,6 +9,7 @@ use crate::database::repositories::{
 };
 use crate::state::AppState;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
+use crate::summary::processor::tokens_to_chars;
 use crate::summary::metadata::{
     read_default_template_from_metadata, read_detected_summary_language_from_metadata,
     read_summary_language_from_metadata, write_detected_summary_language_to_metadata,
@@ -504,13 +506,22 @@ const ASK_QUESTION_MAX_CHARS: usize = 4000;
 /// `api_process_transcript` above.
 const ASK_MEETING_CONTEXT_MAX_CHARS: usize = 40_000;
 
-/// Bound (Unicode chars) on the concatenated per-meeting summary context
-/// built for `ask_across_meetings`. Meetings there are represented by their
-/// (already-compact) summaries rather than raw transcripts, so this can
-/// comfortably cover many meetings' worth of history in one call while
-/// still staying well within the input budget of commonly-configured
-/// provider models.
+/// Fallback bound (Unicode chars) on the concatenated per-meeting summary
+/// context built for `ask_across_meetings`, used only when the dynamic
+/// budget below can't be resolved (e.g. the configured provider/model fails
+/// to resolve at all). In the normal case, `ask_across_meetings` instead
+/// sizes its budget from the actual configured model's context window - see
+/// `resolve_ask_context_budget` - converted from tokens to chars via
+/// `processor::tokens_to_chars`, mirroring how `summary::service` already
+/// sizes the per-meeting summarizer's own budget from the resolved model.
 const ASK_ACROSS_MEETINGS_CONTEXT_MAX_CHARS: usize = 100_000;
+
+/// Hard floor (Unicode chars) under which `ask_across_meetings`'s
+/// dynamically resolved context budget is never allowed to fall, regardless
+/// of what a resolved model's context window computes to - guards against an
+/// implausibly small self-reported context size (or a near-zero token
+/// budget once overhead is reserved) ever producing an unusably tiny prompt.
+const ASK_ACROSS_MEETINGS_CONTEXT_MIN_CHARS: usize = 4_000;
 
 /// Bound (Unicode chars) on the in-progress transcript context built for
 /// `ask_about_live_transcript`, mirroring `ASK_MEETING_CONTEXT_MAX_CHARS`
@@ -800,78 +811,78 @@ async fn get_meeting_summary_markdown(
     extract_markdown_from_result_json(&process.result?)
 }
 
+/// Generic, user-facing error for any failure while resolving or calling the
+/// app's configured LLM provider - never the raw error itself, which for a
+/// `reqwest::Error` can include the request URL (potentially carrying
+/// embedded basic-auth credentials for a Custom-OpenAI endpoint) and for a
+/// provider HTTP failure can include the raw response body. The real error
+/// is always logged server-side via `log_error!` at each wrapping point
+/// below, for diagnosability.
+const ASK_LLM_GENERIC_ERROR: &str =
+    "Failed to reach the configured LLM provider. Check your provider settings and try again.";
+
+/// A resolved plan for calling the app's currently-configured LLM provider,
+/// produced by `resolve_ask_llm_plan`. Kept separate from the actual
+/// `generate_summary` call (`call_ask_llm_plan`) so `ask_across_meetings` can
+/// resolve the provider/model *before* building its prompt - to size its
+/// context budget off the resolved model's own context window - without
+/// resolving the provider config a second time when it goes on to make the
+/// real call.
+enum AskLlmPlan {
+    Builtin {
+        model_name: String,
+        app_data_dir: PathBuf,
+    },
+    Provider(LiveLlmProviderInvocation),
+}
+
 /// Resolves the app's currently-configured default LLM provider/model (the
 /// same `api_get_model_config` lookup `generate_bounded_live_llm_text` uses
-/// in `audio::recording_commands`) and calls `llm_client::generate_summary`
-/// with it - reused as-is here rather than reimplementing provider
-/// branching. Neither `ask_about_meeting` nor `ask_across_meetings` takes a
-/// provider/model argument from the frontend; both always use whatever is
-/// configured in Settings → Model Settings.
-///
-/// Provider errors are collapsed into a fixed, generic user-facing message -
-/// never the raw error itself, which for a `reqwest::Error` can include the
-/// request URL (potentially carrying embedded basic-auth credentials for a
-/// Custom-OpenAI endpoint) and for a provider HTTP failure can include the
-/// raw response body. The real error is still logged server-side via
-/// `log_error!` at each wrapping point below, for diagnosability.
-async fn ask_configured_llm<R: Runtime>(
-    app: &AppHandle<R>,
-    system_prompt: &str,
-    user_prompt: &str,
-) -> Result<String, String> {
-    const GENERIC_LLM_ERROR: &str =
-        "Failed to reach the configured LLM provider. Check your provider settings and try again.";
-
+/// in `audio::recording_commands`) into an `AskLlmPlan`, reusing the exact
+/// same `resolve_live_llm_provider` / `resolve_effective_model_name` /
+/// `resolve_provider_invocation` branching that flow already uses rather
+/// than reimplementing provider selection a second time. Neither
+/// `ask_about_meeting` nor `ask_across_meetings` takes a provider/model
+/// argument from the frontend; both always use whatever is configured in
+/// Settings → Model Settings.
+async fn resolve_ask_llm_plan<R: Runtime>(app: &AppHandle<R>) -> Result<AskLlmPlan, String> {
     let model_config = api_get_model_config(app.clone(), app.clone().state(), None)
         .await
         .map_err(|e| {
-            log_error!("ask_configured_llm: failed to load model config: {}", e);
-            GENERIC_LLM_ERROR.to_string()
+            log_error!("resolve_ask_llm_plan: failed to load model config: {}", e);
+            ASK_LLM_GENERIC_ERROR.to_string()
         })?;
 
     let provider = resolve_live_llm_provider(model_config.as_ref().map(|c| c.provider.as_str()));
-    log_info!("ask_configured_llm: resolved provider {:?}", provider);
+    log_info!("resolve_ask_llm_plan: resolved provider {:?}", provider);
 
-    let client = reqwest::Client::new();
-
-    let result: Result<String, String> = if provider == LLMProvider::BuiltInAI {
+    if provider == LLMProvider::BuiltInAI {
         let app_data_dir = app.path().app_data_dir().map_err(|e| {
-            log_error!("ask_configured_llm: failed to resolve app data directory: {}", e);
-            GENERIC_LLM_ERROR.to_string()
+            log_error!(
+                "resolve_ask_llm_plan: failed to resolve app data directory: {}",
+                e
+            );
+            ASK_LLM_GENERIC_ERROR.to_string()
         })?;
         let model_name = model_config
             .as_ref()
             .map(|c| c.model.as_str())
             .filter(|m| !m.trim().is_empty())
             .ok_or_else(|| {
-                log_warn!("ask_configured_llm: no local model configured for BuiltInAI provider");
+                log_warn!("resolve_ask_llm_plan: no local model configured for BuiltInAI provider");
                 "No local model configured — configure a builtin AI model in Settings → Model \
                  Settings."
                     .to_string()
-            })?;
+            })?
+            .to_string();
 
-        generate_summary(
-            &client,
-            &provider,
-            model_name,
-            "",
-            system_prompt,
-            user_prompt,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(&app_data_dir),
-            None,
-        )
-        .await
+        Ok(AskLlmPlan::Builtin { model_name, app_data_dir })
     } else {
         let effective_model_name =
             resolve_effective_model_name(None, model_config.as_ref().map(|c| c.model.as_str()))
                 .ok_or_else(|| {
                     log_warn!(
-                        "ask_configured_llm: no model configured for provider {:?}",
+                        "resolve_ask_llm_plan: no model configured for provider {:?}",
                         provider
                     );
                     "No model configured for the selected provider — configure one in \
@@ -896,28 +907,85 @@ async fn ask_configured_llm<R: Runtime>(
             custom_openai_config.as_ref(),
         )?;
 
-        generate_summary(
-            &client,
-            &invocation.provider,
-            &invocation.model_name,
-            &invocation.api_key,
-            system_prompt,
-            user_prompt,
-            invocation.ollama_endpoint.as_deref(),
-            invocation.custom_openai_endpoint.as_deref(),
-            invocation.custom_openai_max_tokens,
-            invocation.custom_openai_temperature,
-            invocation.custom_openai_top_p,
-            None,
-            None,
-        )
-        .await
+        Ok(AskLlmPlan::Provider(invocation))
+    }
+}
+
+/// Calls `llm_client::generate_summary` for an already-resolved `plan`.
+/// `ollama_num_ctx` is forwarded unconditionally as `generate_summary`'s
+/// `num_ctx` argument - like the `invocation.custom_openai_*` fields below,
+/// it's `generate_summary` itself that only applies it for the matching
+/// provider (Ollama), so it's a no-op to filter by provider here too. Every
+/// ask command besides `ask_across_meetings` just passes `None` here, per
+/// that dynamic-budget treatment being scoped to `ask_across_meetings`
+/// alone.
+async fn call_ask_llm_plan(
+    plan: AskLlmPlan,
+    system_prompt: &str,
+    user_prompt: &str,
+    ollama_num_ctx: Option<u32>,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    let result: Result<String, String> = match plan {
+        AskLlmPlan::Builtin { model_name, app_data_dir } => {
+            generate_summary(
+                &client,
+                &LLMProvider::BuiltInAI,
+                &model_name,
+                "",
+                system_prompt,
+                user_prompt,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&app_data_dir),
+                None,
+                None,
+            )
+            .await
+        }
+        AskLlmPlan::Provider(invocation) => {
+            generate_summary(
+                &client,
+                &invocation.provider,
+                &invocation.model_name,
+                &invocation.api_key,
+                system_prompt,
+                user_prompt,
+                invocation.ollama_endpoint.as_deref(),
+                invocation.custom_openai_endpoint.as_deref(),
+                invocation.custom_openai_max_tokens,
+                invocation.custom_openai_temperature,
+                invocation.custom_openai_top_p,
+                None,
+                None,
+                ollama_num_ctx,
+            )
+            .await
+        }
     };
 
     result.map_err(|e| {
-        log_error!("ask_configured_llm: LLM provider call failed: {}", e);
-        GENERIC_LLM_ERROR.to_string()
+        log_error!("call_ask_llm_plan: LLM provider call failed: {}", e);
+        ASK_LLM_GENERIC_ERROR.to_string()
     })
+}
+
+/// Resolves the app's currently-configured LLM provider and calls it with
+/// `system_prompt`/`user_prompt` - a thin `resolve_ask_llm_plan` +
+/// `call_ask_llm_plan` wrapper for callers that (unlike `ask_across_meetings`
+/// below) don't need the resolved plan for anything besides making this one
+/// call.
+async fn ask_configured_llm<R: Runtime>(
+    app: &AppHandle<R>,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<String, String> {
+    let plan = resolve_ask_llm_plan(app).await?;
+    call_ask_llm_plan(plan, system_prompt, user_prompt, None).await
 }
 
 /// Answers a free-text question about a single meeting, using its stored
@@ -1102,8 +1170,88 @@ pub async fn suggest_meeting_questions<R: Runtime>(
     ask_configured_llm(&app, SUGGEST_QUESTIONS_SYSTEM_PROMPT, &context).await
 }
 
+/// The resolved LLM context budget for `ask_across_meetings`'s prompt,
+/// produced by `resolve_ask_context_budget`. Mirrors
+/// `SummaryService::process_transcript_background`'s per-provider context
+/// resolution (`summary::service`) rather than reimplementing it: Ollama
+/// models via the shared `METADATA_CACHE`, BuiltInAI models via the local
+/// model registry, and every other (cloud) provider gets the same flat,
+/// effectively-unlimited budget that flow uses.
+struct AskContextBudget {
+    /// The model's raw resolved context window, in tokens - only ever `Some`
+    /// for an Ollama plan. This (not `budget_tokens` below) is what should be
+    /// sent as `num_ctx` on the actual call, since `num_ctx` should reflect
+    /// the model's real window, not the reserved-overhead budget the prompt
+    /// was sized against.
+    raw_context_tokens: Option<u32>,
+    /// The token budget the prompt should actually be sized against: the raw
+    /// context window (or the flat cloud-provider figure) minus a reserved
+    /// 300 tokens of overhead - the same reservation
+    /// `process_transcript_background` makes for the same reason.
+    budget_tokens: usize,
+}
+
+/// Computes `plan`'s `AskContextBudget`. Every branch mirrors a fallback
+/// `process_transcript_background` already uses for the same provider - a
+/// metadata-fetch failure or unrecognized model name here degrades to that
+/// flow's same conservative default rather than failing `ask_across_meetings`
+/// outright.
+async fn resolve_ask_context_budget(plan: &AskLlmPlan) -> AskContextBudget {
+    match plan {
+        AskLlmPlan::Builtin { model_name, .. } => {
+            use crate::summary::summary_engine::models;
+            match models::get_model_by_name(model_name) {
+                Some(model_def) => AskContextBudget {
+                    raw_context_tokens: None,
+                    budget_tokens: model_def.context_size.saturating_sub(300) as usize,
+                },
+                None => AskContextBudget {
+                    raw_context_tokens: None,
+                    budget_tokens: 1748, // 2048 - 300, same fallback as process_transcript_background
+                },
+            }
+        }
+        AskLlmPlan::Provider(invocation) if invocation.provider == LLMProvider::Ollama => {
+            match crate::summary::service::METADATA_CACHE
+                .get_or_fetch(&invocation.model_name, invocation.ollama_endpoint.as_deref())
+                .await
+            {
+                Ok(metadata) => AskContextBudget {
+                    raw_context_tokens: Some(metadata.context_size as u32),
+                    budget_tokens: metadata.context_size.saturating_sub(300),
+                },
+                Err(e) => {
+                    log_warn!(
+                        "resolve_ask_context_budget: failed to fetch Ollama context for {}: {}. Using default 4000",
+                        invocation.model_name, e
+                    );
+                    AskContextBudget { raw_context_tokens: None, budget_tokens: 4000 }
+                }
+            }
+        }
+        AskLlmPlan::Provider(_) => AskContextBudget {
+            raw_context_tokens: None,
+            budget_tokens: 100_000, // cloud providers: effectively unlimited for single-pass processing
+        },
+    }
+}
+
+/// Converts a resolved token budget into the Unicode-char budget
+/// `ask_across_meetings` uses for `build_cross_meeting_context`, applying
+/// `ASK_ACROSS_MEETINGS_CONTEXT_MIN_CHARS` as a hard floor. Split out from
+/// `resolve_ask_context_budget`'s async branching so this arithmetic is
+/// unit-testable without a network call. Pure/sync.
+fn ask_across_meetings_char_budget(budget_tokens: usize) -> usize {
+    tokens_to_chars(budget_tokens).max(ASK_ACROSS_MEETINGS_CONTEXT_MIN_CHARS)
+}
+
 /// Answers a free-text question that may span multiple meetings, using each
-/// meeting's stored summary as context for the app's configured LLM.
+/// meeting's stored summary as context for the app's configured LLM. Sizes
+/// its context budget dynamically from the resolved provider/model's actual
+/// context window (`resolve_ask_context_budget`) rather than a flat
+/// character cap, and - for Ollama specifically - forwards that model's
+/// resolved context size as `num_ctx` on the actual call, so the prompt this
+/// command builds and the window the model is told to use stay in sync.
 #[tauri::command]
 pub async fn ask_across_meetings<R: Runtime>(
     app: AppHandle<R>,
@@ -1127,6 +1275,28 @@ pub async fn ask_across_meetings<R: Runtime>(
         return Ok("No meetings found yet.".to_string());
     }
 
+    // Resolved *before* building the prompt below (unlike every other ask
+    // command, which resolves the plan lazily inside `ask_configured_llm` at
+    // call time) so the char budget can be sized from the actual configured
+    // model's context window. A resolution failure here degrades to the
+    // fixed `ASK_ACROSS_MEETINGS_CONTEXT_MAX_CHARS` budget rather than
+    // failing the whole command outright - the actual LLM call below still
+    // surfaces the real error once it's attempted with the same `plan_result`.
+    let plan_result = resolve_ask_llm_plan(&app).await;
+    let (max_chars, ollama_num_ctx) = match &plan_result {
+        Ok(plan) => {
+            let budget = resolve_ask_context_budget(plan).await;
+            (ask_across_meetings_char_budget(budget.budget_tokens), budget.raw_context_tokens)
+        }
+        Err(e) => {
+            log_warn!(
+                "ask_across_meetings: failed to resolve LLM plan for context sizing, falling back to fixed budget: {}",
+                e
+            );
+            (ASK_ACROSS_MEETINGS_CONTEXT_MAX_CHARS, None)
+        }
+    };
+
     // Single batched fetch instead of one summary query per meeting (was an
     // N+1 query pattern here).
     let meeting_ids: Vec<String> = meetings.iter().map(|m| m.id.clone()).collect();
@@ -1149,13 +1319,13 @@ pub async fn ask_across_meetings<R: Runtime>(
         .collect();
 
     log_info!(
-        "ask_across_meetings: loaded {} meetings, {} with a usable summary",
+        "ask_across_meetings: loaded {} meetings, {} with a usable summary, context budget {} chars",
         meetings.len(),
-        meeting_summaries.iter().filter(|(_, _, s)| s.is_some()).count()
+        meeting_summaries.iter().filter(|(_, _, s)| s.is_some()).count(),
+        max_chars
     );
 
-    let context =
-        build_cross_meeting_context(&meeting_summaries, ASK_ACROSS_MEETINGS_CONTEXT_MAX_CHARS);
+    let context = build_cross_meeting_context(&meeting_summaries, max_chars);
 
     if context.trim().is_empty() {
         log_info!("ask_across_meetings: no usable meeting summaries to answer from");
@@ -1164,12 +1334,77 @@ pub async fn ask_across_meetings<R: Runtime>(
 
     let user_prompt = format!("{}\n\nQuestion: {}", context, question);
 
-    ask_configured_llm(&app, ASK_ACROSS_MEETINGS_SYSTEM_PROMPT, &user_prompt).await
+    let plan = plan_result?;
+    call_ask_llm_plan(plan, ASK_ACROSS_MEETINGS_SYSTEM_PROMPT, &user_prompt, ollama_num_ctx).await
 }
 
 #[cfg(test)]
 mod ask_ai_tests {
     use super::*;
+
+    // ---- ask_across_meetings_char_budget ----
+
+    #[test]
+    fn ask_across_meetings_char_budget_converts_tokens_to_chars() {
+        // 32768 - 300 (a realistic post-reservation Ollama budget) converts
+        // via the shared tokens_to_chars ratio, well above the floor.
+        let budget_tokens = 32768usize.saturating_sub(300);
+        assert_eq!(
+            ask_across_meetings_char_budget(budget_tokens),
+            tokens_to_chars(budget_tokens)
+        );
+    }
+
+    #[test]
+    fn ask_across_meetings_char_budget_enforces_hard_floor() {
+        // An implausibly small resolved budget must still clamp up to the
+        // documented floor rather than producing a near-empty prompt budget.
+        assert_eq!(
+            ask_across_meetings_char_budget(1),
+            ASK_ACROSS_MEETINGS_CONTEXT_MIN_CHARS
+        );
+        assert_eq!(
+            ask_across_meetings_char_budget(0),
+            ASK_ACROSS_MEETINGS_CONTEXT_MIN_CHARS
+        );
+    }
+
+    #[test]
+    fn ask_across_meetings_char_budget_cloud_provider_budget_stays_above_floor() {
+        // The flat 100_000-token cloud-provider budget from
+        // resolve_ask_context_budget converts to a value far above the
+        // floor, so the floor never kicks in for the common case.
+        let chars = ask_across_meetings_char_budget(100_000);
+        assert!(chars > ASK_ACROSS_MEETINGS_CONTEXT_MIN_CHARS);
+        assert_eq!(chars, tokens_to_chars(100_000));
+    }
+
+    // ---- resolve_ask_context_budget (BuiltInAI branch only - the Ollama and
+    // cloud-provider branches require network I/O and are not covered here) ----
+
+    #[tokio::test]
+    async fn resolve_ask_context_budget_builtin_known_model_reserves_300_tokens() {
+        let plan = AskLlmPlan::Builtin {
+            model_name: "qwen3.5:2b".to_string(),
+            app_data_dir: PathBuf::from("/tmp"),
+        };
+        let budget = resolve_ask_context_budget(&plan).await;
+        assert_eq!(budget.raw_context_tokens, None);
+        // qwen3.5:2b's registered context_size is 32768 - see
+        // summary_engine::models::get_available_models.
+        assert_eq!(budget.budget_tokens, 32768 - 300);
+    }
+
+    #[tokio::test]
+    async fn resolve_ask_context_budget_builtin_unknown_model_falls_back_to_1748() {
+        let plan = AskLlmPlan::Builtin {
+            model_name: "not-a-real-model:latest".to_string(),
+            app_data_dir: PathBuf::from("/tmp"),
+        };
+        let budget = resolve_ask_context_budget(&plan).await;
+        assert_eq!(budget.raw_context_tokens, None);
+        assert_eq!(budget.budget_tokens, 1748);
+    }
 
     #[test]
     fn validate_ask_question_rejects_empty() {
