@@ -29,6 +29,142 @@ pub(crate) static METADATA_CACHE: Lazy<ModelMetadataCache> = Lazy::new(|| {
     ModelMetadataCache::new(Duration::from_secs(300))
 });
 
+/// Number of tokens reserved for prompt overhead when sizing a context
+/// budget off a resolved model's raw context window (Ollama, BuiltInAI).
+const CONTEXT_BUDGET_RESERVED_TOKENS: u32 = 300;
+
+/// Floor below which an Ollama-reported `context_size` is treated as bogus
+/// metadata rather than a real (if unusually small) context window. Real
+/// models' advertised windows run from the low thousands up; this sits far
+/// below any of them so it only catches malformed/zeroed `model_info` (e.g.
+/// a literal `context_length: 0`), never a legitimate small-context model.
+/// `extract_context_from_model_info` (ollama::metadata) only recognizes its
+/// own `ULTIMATE_FALLBACK` sentinel as "not found", so a server-reported `0`
+/// sails through `fetch_model_info` unguarded - this is the backstop that
+/// catches it before it becomes `num_ctx: 0` on the wire.
+const MIN_SANE_OLLAMA_CONTEXT_TOKENS: u32 = 100;
+
+/// Fallback token budget (already net of `CONTEXT_BUDGET_RESERVED_TOKENS`)
+/// used for Ollama when a real context window can't be resolved - either the
+/// metadata fetch failed, or the model reported an implausibly small
+/// `context_size` (see `MIN_SANE_OLLAMA_CONTEXT_TOKENS`).
+const OLLAMA_FALLBACK_BUDGET_TOKENS: usize = 4000;
+
+/// Fallback token budget (already net of `CONTEXT_BUDGET_RESERVED_TOKENS`)
+/// used for a BuiltInAI model name not found in the local model registry:
+/// `2048 - 300`.
+const BUILTIN_AI_FALLBACK_BUDGET_TOKENS: usize = 1748;
+
+/// Flat token budget used for every other (cloud/custom) provider - OpenAI,
+/// Claude, Groq, OpenRouter, CustomOpenAI, LmStudio - whose actual context
+/// window this app doesn't resolve per-model. Meant as "effectively
+/// unlimited" for this module's chunked, multi-call per-meeting
+/// summarization (`process_transcript_background`, below). A caller with a
+/// single-shot prompt budget instead of a chunking budget (e.g.
+/// `summary::commands::ask_across_meetings`) should NOT feed this directly
+/// through `tokens_to_chars` - see that command's own cap for why.
+pub(crate) const CLOUD_PROVIDER_BUDGET_TOKENS: usize = 100_000;
+
+/// The resolved LLM context budget for a given provider/model, produced by
+/// `resolve_provider_context_budget`.
+pub(crate) struct ProviderContextBudget {
+    /// The model's raw resolved context window, in tokens - only ever `Some`
+    /// for Ollama, and never `Some(0)` (see `MIN_SANE_OLLAMA_CONTEXT_TOKENS`).
+    /// This is what should be sent as `num_ctx` on an actual Ollama call,
+    /// since `num_ctx` should reflect the model's real window, not the
+    /// reserved-overhead budget below.
+    pub(crate) raw_context_tokens: Option<u32>,
+    /// The token budget a prompt/chunking pass should actually be sized
+    /// against: the raw context window minus `CONTEXT_BUDGET_RESERVED_TOKENS`
+    /// of overhead for Ollama and BuiltInAI, where a real context window is
+    /// resolved - or the flat, unreserved `CLOUD_PROVIDER_BUDGET_TOKENS`
+    /// placeholder for every other (cloud) provider, where no real per-model
+    /// context data is known.
+    pub(crate) budget_tokens: usize,
+}
+
+/// Resolves `provider`/`model_name`'s `ProviderContextBudget`. Shared by
+/// `process_transcript_background` (below) and
+/// `summary::commands::ask_across_meetings`'s context-budget resolution -
+/// previously duplicated in both places with the same magic numbers, which
+/// had already drifted (the zero/bogus-context guard below once existed in
+/// only one of the two copies).
+///
+/// For Ollama, fetches the model's real context window via `METADATA_CACHE`
+/// (a network round-trip) and reserves `CONTEXT_BUDGET_RESERVED_TOKENS` of
+/// overhead, guarding against a zero/bogus-small reported `context_size` by
+/// falling back to `OLLAMA_FALLBACK_BUDGET_TOKENS`. For BuiltInAI, looks up
+/// the model in the local registry with the same reservation, falling back
+/// to `BUILTIN_AI_FALLBACK_BUDGET_TOKENS` for an unrecognized model name.
+/// For every other provider, returns the flat `CLOUD_PROVIDER_BUDGET_TOKENS`
+/// placeholder with no reservation applied.
+pub(crate) async fn resolve_provider_context_budget(
+    provider: &LLMProvider,
+    model_name: &str,
+    ollama_endpoint: Option<&str>,
+) -> ProviderContextBudget {
+    if *provider == LLMProvider::Ollama {
+        match METADATA_CACHE.get_or_fetch(model_name, ollama_endpoint).await {
+            Ok(metadata) if metadata.context_size >= MIN_SANE_OLLAMA_CONTEXT_TOKENS as usize => {
+                let optimal = metadata.context_size.saturating_sub(CONTEXT_BUDGET_RESERVED_TOKENS as usize);
+                info!(
+                    "✓ Using dynamic context for {}: {} tokens (chunk size: {})",
+                    model_name, metadata.context_size, optimal
+                );
+                ProviderContextBudget {
+                    raw_context_tokens: Some(metadata.context_size as u32),
+                    budget_tokens: optimal,
+                }
+            }
+            Ok(metadata) => {
+                warn!(
+                    "resolve_provider_context_budget: Ollama reported an implausibly small \
+                     context_size ({}) for {} - treating as unusable metadata. Using default {}",
+                    metadata.context_size, model_name, OLLAMA_FALLBACK_BUDGET_TOKENS
+                );
+                ProviderContextBudget {
+                    raw_context_tokens: None,
+                    budget_tokens: OLLAMA_FALLBACK_BUDGET_TOKENS,
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to fetch context for {}: {}. Using default {}",
+                    model_name, e, OLLAMA_FALLBACK_BUDGET_TOKENS
+                );
+                ProviderContextBudget {
+                    raw_context_tokens: None,
+                    budget_tokens: OLLAMA_FALLBACK_BUDGET_TOKENS,
+                }
+            }
+        }
+    } else if *provider == LLMProvider::BuiltInAI {
+        use crate::summary::summary_engine::models;
+        match models::get_model_by_name(model_name) {
+            Some(model_def) => {
+                let optimal = model_def.context_size.saturating_sub(CONTEXT_BUDGET_RESERVED_TOKENS) as usize;
+                info!(
+                    "✓ Using BuiltInAI context size: {} tokens (chunk size: {})",
+                    model_def.context_size, optimal
+                );
+                ProviderContextBudget { raw_context_tokens: None, budget_tokens: optimal }
+            }
+            None => {
+                warn!(
+                    "Unknown model: {}, using default {}",
+                    model_name, BUILTIN_AI_FALLBACK_BUDGET_TOKENS
+                );
+                ProviderContextBudget {
+                    raw_context_tokens: None,
+                    budget_tokens: BUILTIN_AI_FALLBACK_BUDGET_TOKENS,
+                }
+            }
+        }
+    } else {
+        ProviderContextBudget { raw_context_tokens: None, budget_tokens: CLOUD_PROVIDER_BUDGET_TOKENS }
+    }
+}
+
 // Global registry for cancellation tokens (thread-safe)
 static CANCELLATION_REGISTRY: Lazy<Arc<Mutex<HashMap<String, CancellationToken>>>> =
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
@@ -439,51 +575,17 @@ impl SummaryService {
             api_key
         };
 
-        // Dynamically fetch context size based on provider and model
-        let token_threshold = if provider == LLMProvider::Ollama {
-            match METADATA_CACHE.get_or_fetch(&model_name, ollama_endpoint.as_deref()).await {
-                Ok(metadata) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = metadata.context_size.saturating_sub(300);
-                    info!(
-                        "✓ Using dynamic context for {}: {} tokens (chunk size: {})",
-                        model_name, metadata.context_size, optimal
-                    );
-                    optimal
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to fetch context for {}: {}. Using default 4000",
-                        model_name, e
-                    );
-                    4000  // Fallback to safe default
-                }
-            }
-        } else if provider == LLMProvider::BuiltInAI {
-            // Get model's context size from registry
-            use crate::summary::summary_engine::models;
-            let model = models::get_model_by_name(&model_name)
-                .ok_or_else(|| format!("Unknown model: {}", model_name));
-
-            match model {
-                Ok(model_def) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = model_def.context_size.saturating_sub(300) as usize;
-                    info!(
-                        "✓ Using BuiltInAI context size: {} tokens (chunk size: {})",
-                        model_def.context_size, optimal
-                    );
-                    optimal
-                }
-                Err(e) => {
-                    warn!("{}, using default 2048", e);
-                    1748  // 2048 - 300 for overhead
-                }
-            }
-        } else {
-            // Cloud providers (OpenAI, Claude, Groq, CustomOpenAI) handle large contexts automatically
-            100000  // Effectively unlimited for single-pass processing
-        };
+        // Dynamically size context based on provider and model - shared with
+        // `summary::commands::ask_across_meetings`'s context-budget
+        // resolution via `resolve_provider_context_budget`. Only
+        // `budget_tokens` is needed here; the raw (unreserved) context
+        // window `resolve_provider_context_budget` also resolves for Ollama
+        // is only relevant to callers that forward it as `num_ctx`, which
+        // this chunking path does not do.
+        let token_threshold =
+            resolve_provider_context_budget(&provider, &model_name, ollama_endpoint.as_deref())
+                .await
+                .budget_tokens;
 
         // Get app data directory for BuiltInAI provider
         let app_data_dir = _app.path().app_data_dir().ok();
