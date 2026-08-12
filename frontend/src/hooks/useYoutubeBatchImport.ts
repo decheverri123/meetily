@@ -72,7 +72,7 @@ export interface UseYoutubeBatchImportReturn {
   startBatch: (titles?: (string | null)[]) => Promise<void>;
   cancelBatch: () => Promise<void>;
   reset: () => void;
-  parseQueue: (text: string) => QueueEntry[];
+  parseQueue: typeof parseQueueInput;
 }
 
 const YOUTUBE_URL_RE = /^(https?:\/\/)?(www\.|m\.|music\.)?(youtube\.com\/(watch\?v=[^&\s]+|shorts\/[A-Za-z0-9_-]+|embed\/[A-Za-z0-9_-]+|live\/[A-Za-z0-9_-]+)|youtu\.be\/[A-Za-z0-9_-]+)\/?(\S*)$/;
@@ -111,10 +111,6 @@ export function useYoutubeBatchImport(): UseYoutubeBatchImportReturn {
   const [error, setError] = useState<string | null>(null);
 
   const isCancelledRef = useRef(false);
-
-  const parseQueue = useCallback((text: string): QueueEntry[] => {
-    return parseQueueInput(text);
-  }, []);
 
   useEffect(() => {
     const unlisteners: UnlistenFn[] = [];
@@ -252,6 +248,6 @@ export function useYoutubeBatchImport(): UseYoutubeBatchImportReturn {
     startBatch,
     cancelBatch,
     reset,
-    parseQueue,
+    parseQueue: parseQueueInput,
   };
 }
