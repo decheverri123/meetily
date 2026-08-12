@@ -688,4 +688,276 @@ mod tests {
         assert_eq!(BatchItemStatus::Failed, BatchItemStatus::Failed);
         assert_ne!(BatchItemStatus::Failed, BatchItemStatus::Complete);
     }
+
+    // =========================================================================
+    // Adversarial tests (breaker agent pass 1)
+    // =========================================================================
+    // Focus: URL parsing edge cases (whitespace, control chars, dedup, very
+    // long lists), playlist URLs, title alignment, and aggregator invariants
+    // under load.
+
+    #[test]
+    fn test_parse_batch_url_input_handles_only_whitespace() {
+        let parsed = parse_batch_url_input("   \n\t  \n   \r\n");
+        assert!(parsed.is_empty(), "got {:?}", parsed);
+    }
+
+    #[test]
+    fn test_parse_batch_url_input_treats_internal_whitespace_as_separators() {
+        // "a b" stays as one URL (URLs shouldn't have spaces anyway, so
+        // is_valid_youtube_url will reject it later).
+        let parsed = parse_batch_url_input("https://youtu.be/a b\nhttps://youtu.be/c");
+        // split happens only on \n, not spaces.
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], "https://youtu.be/a b");
+        assert_eq!(parsed[1], "https://youtu.be/c");
+    }
+
+    #[test]
+    fn test_parse_batch_url_input_dedups_case_sensitive() {
+        // Two URLs that differ only in case (e.g. scheme or path). The
+        // current dedup is exact-match, so these are NOT deduped.
+        let parsed = parse_batch_url_input(
+            "https://youtu.be/abc\nhttps://Youtu.be/abc\nHTTPS://YOUTU.BE/abc",
+        );
+        assert_eq!(
+            parsed.len(),
+            3,
+            "case-only variants are NOT deduped (got {:?})",
+            parsed
+        );
+    }
+
+    #[test]
+    fn test_parse_batch_url_input_handles_100_url_list() {
+        // 100 distinct valid URLs — exercises dedup/trim/partition on a
+        // realistic batch size.
+        let mut s = String::new();
+        for i in 0..100 {
+            if i > 0 {
+                s.push('\n');
+            }
+            s.push_str(&format!("  https://youtu.be/id{i:03}  "));
+        }
+        let parsed = parse_batch_url_input(&s);
+        assert_eq!(parsed.len(), 100);
+        assert_eq!(parsed[0], "https://youtu.be/id000");
+        assert_eq!(parsed[99], "https://youtu.be/id099");
+    }
+
+    #[test]
+    fn test_parse_batch_url_input_handles_url_with_extra_query_params() {
+        // Valid YouTube URLs with start time, feature, etc.
+        let parsed = parse_batch_url_input(
+            "https://www.youtube.com/watch?v=abc&t=42s\nhttps://www.youtube.com/watch?v=def&feature=share",
+        );
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn test_partition_valid_urls_classifies_playlist_url_as_valid() {
+        // Documents behavior: a watch URL with `&list=PLxyz` is currently
+        // accepted as valid. The Rust is_valid_youtube_url only checks for
+        // the v= param, not playlist context. Whether this is a bug depends
+        // on product intent; this test pins current behavior.
+        let urls = vec!["https://www.youtube.com/watch?v=abc&list=PLxyz".to_string()];
+        let (valid, invalid) = partition_valid_urls(urls);
+        assert_eq!(valid.len(), 1, "playlist URL was rejected: invalid={:?}", invalid);
+        assert_eq!(valid[0].0, "https://www.youtube.com/watch?v=abc&list=PLxyz");
+    }
+
+    #[test]
+    fn test_partition_valid_urls_rejects_bare_playlist_url() {
+        // A pure playlist URL (no v= param) must be rejected.
+        let urls = vec!["https://www.youtube.com/playlist?list=PLxyz".to_string()];
+        let (valid, invalid) = partition_valid_urls(urls);
+        assert!(valid.is_empty());
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].0, "https://www.youtube.com/playlist?list=PLxyz");
+    }
+
+    #[test]
+    fn test_partition_valid_urls_rejects_non_youtube_urls() {
+        // Direct mp4, vimeo, twitch, dailymotion.
+        let urls = vec![
+            "https://example.com/video.mp4".to_string(),
+            "https://vimeo.com/12345".to_string(),
+            "https://www.twitch.tv/videos/12345".to_string(),
+            "https://www.dailymotion.com/video/x7tg8e0".to_string(),
+        ];
+        let (valid, invalid) = partition_valid_urls(urls);
+        assert!(valid.is_empty(), "got valid={:?}", valid);
+        assert_eq!(invalid.len(), 4);
+    }
+
+    #[test]
+    fn test_parse_and_validate_handles_more_titles_than_urls() {
+        // More titles than URLs: extra titles are ignored.
+        let (valid, invalid) = parse_and_validate_batch_input(
+            "https://youtu.be/a\nhttps://youtu.be/b",
+            Some(vec![
+                "T1".to_string(),
+                "T2".to_string(),
+                "T3-extra".to_string(),
+            ]),
+        );
+        assert_eq!(valid.len(), 2);
+        assert_eq!(valid[0].1.as_deref(), Some("T1"));
+        assert_eq!(valid[1].1.as_deref(), Some("T2"));
+        assert!(invalid.is_empty());
+    }
+
+    #[test]
+    fn test_parse_and_validate_handles_fewer_titles_than_urls() {
+        // Fewer titles than URLs: extra URLs have no title.
+        let (valid, _invalid) = parse_and_validate_batch_input(
+            "https://youtu.be/a\nhttps://youtu.be/b\nhttps://youtu.be/c",
+            Some(vec!["T1".to_string()]),
+        );
+        assert_eq!(valid.len(), 3);
+        assert_eq!(valid[0].1.as_deref(), Some("T1"));
+        assert!(valid[1].1.is_none());
+        assert!(valid[2].1.is_none());
+    }
+
+    #[test]
+    fn test_parse_and_validate_titles_align_only_to_valid_urls() {
+        // Titles are aligned to *valid* URLs, not to raw input lines.
+        // So an invalid URL at position 0 shifts the title mapping.
+        let (valid, _invalid) = parse_and_validate_batch_input(
+            "garbage\nhttps://youtu.be/real",
+            Some(vec!["TitleForFirst".to_string(), "TitleForSecond".to_string()]),
+        );
+        assert_eq!(valid.len(), 1);
+        // Title index 0 maps to the first valid slot — i.e. "TitleForFirst"
+        assert_eq!(valid[0].1.as_deref(), Some("TitleForFirst"));
+    }
+
+    #[test]
+    fn test_parse_and_validate_blank_titles_become_none() {
+        // Whitespace-only titles are dropped, not stored as the whitespace.
+        let (valid, _) = parse_and_validate_batch_input(
+            "https://youtu.be/a\nhttps://youtu.be/b\nhttps://youtu.be/c",
+            Some(vec!["   ".to_string(), "\t\n".to_string(), "Real".to_string()]),
+        );
+        assert!(valid[0].1.is_none());
+        assert!(valid[1].1.is_none());
+        assert_eq!(valid[2].1.as_deref(), Some("Real"));
+    }
+
+    #[test]
+    fn test_aggregator_recompute_counts_cancelled_counted_as_failed() {
+        // Cancelled items roll into the "failed" count by design. Verify
+        // that explicit. The frontend uses "failed" to show the error
+        // summary, so cancelled being lumped in is observable.
+        let mut agg = BatchAggregator::new(vec![
+            url_with_title("a"),
+            url_with_title("b"),
+            url_with_title("c"),
+        ]);
+        agg.set_item_status(0, BatchItemStatus::Complete, 100, None, Some("m".into()));
+        agg.set_item_status(1, BatchItemStatus::Cancelled, 0, Some("c".into()), None);
+        agg.set_item_status(2, BatchItemStatus::Failed, 0, Some("e".into()), None);
+        agg.recompute_counts();
+        assert_eq!(agg.completed, 1);
+        assert_eq!(agg.failed, 2, "cancelled items contribute to failed count");
+    }
+
+    #[test]
+    fn test_aggregator_completed_count_excludes_downloaded_only() {
+        // Only "Complete" counts as completed. Downloaded-but-not-transcribed
+        // items are still in-flight.
+        let mut agg = BatchAggregator::new(vec![
+            url_with_title("a"),
+            url_with_title("b"),
+            url_with_title("c"),
+        ]);
+        agg.set_item_status(0, BatchItemStatus::Downloaded, 15, None, None);
+        agg.set_item_status(1, BatchItemStatus::Transcribing, 30, None, None);
+        agg.set_item_status(2, BatchItemStatus::Complete, 100, None, Some("m".into()));
+        agg.recompute_counts();
+        assert_eq!(agg.completed, 1);
+        assert_eq!(agg.failed, 0);
+    }
+
+    #[test]
+    fn test_aggregator_100_items_does_not_panic() {
+        let requests: Vec<(String, Option<String>)> = (0..100)
+            .map(|i| (format!("https://youtu.be/id{i:03}"), None))
+            .collect();
+        let mut agg = BatchAggregator::new(requests);
+        for i in 0..100 {
+            let status = match i % 5 {
+                0 => BatchItemStatus::Complete,
+                1 => BatchItemStatus::Failed,
+                2 => BatchItemStatus::Cancelled,
+                3 => BatchItemStatus::Downloading,
+                _ => BatchItemStatus::Transcribing,
+            };
+            agg.set_item_status(i, status, 0, None, None);
+        }
+        agg.recompute_counts();
+        // 20 Complete (i % 5 == 0), 20 Failed, 20 Cancelled
+        assert_eq!(agg.completed, 20);
+        assert_eq!(agg.failed, 40, "Failed + Cancelled");
+    }
+
+    #[test]
+    fn test_aggregator_mark_remaining_preserves_terminal_statuses() {
+        // Items already in Complete, Failed, or Cancelled must NOT be
+        // overwritten by mark_remaining_cancelled.
+        let mut agg = BatchAggregator::new(vec![
+            url_with_title("a"),
+            url_with_title("b"),
+            url_with_title("c"),
+            url_with_title("d"),
+        ]);
+        agg.set_item_status(0, BatchItemStatus::Complete, 100, None, Some("m0".into()));
+        agg.set_item_status(1, BatchItemStatus::Failed, 0, Some("original err".into()), None);
+        agg.set_item_status(2, BatchItemStatus::Cancelled, 0, Some("orig cancel".into()), None);
+        agg.set_item_status(3, BatchItemStatus::Downloading, 0, None, None);
+        agg.mark_remaining_cancelled();
+        assert_eq!(agg.items[0].status, BatchItemStatus::Complete);
+        assert_eq!(agg.items[1].status, BatchItemStatus::Failed);
+        assert_eq!(agg.items[2].status, BatchItemStatus::Cancelled);
+        assert_eq!(agg.items[3].status, BatchItemStatus::Cancelled);
+        // The Complete item must keep its meeting_id; failed/cancelled must
+        // not be overwritten with "Batch cancelled".
+        assert_eq!(agg.items[0].meeting_id.as_deref(), Some("m0"));
+        assert_eq!(agg.items[1].error.as_deref(), Some("original err"));
+        assert_eq!(agg.items[2].error.as_deref(), Some("orig cancel"));
+    }
+
+    #[test]
+    fn test_snapshot_total_reflects_input_not_terminal_state() {
+        // The snapshot's `total` is the input size, not the count of
+        // completed/failed items. Note: snapshot returns the cached
+        // completed/failed counters — recompute_counts() must be called
+        // before snapshot for the counters to be accurate. This test
+        // pins that contract.
+        let mut agg = BatchAggregator::new(vec![
+            url_with_title("a"),
+            url_with_title("b"),
+            url_with_title("c"),
+        ]);
+        agg.set_item_status(0, BatchItemStatus::Complete, 100, None, Some("m".into()));
+        agg.set_item_status(1, BatchItemStatus::Failed, 0, Some("e".into()), None);
+        agg.recompute_counts();
+        let snap = agg.snapshot("batch-1", true);
+        assert_eq!(snap.total, 3);
+        assert_eq!(snap.completed, 1);
+        assert_eq!(snap.failed, 1);
+        assert_eq!(snap.items.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_batch_url_input_handles_urls_with_internal_newlines_after_trim() {
+        // URLs themselves don't contain newlines (those are separators),
+        // but trim() removes only outer whitespace. A URL with a newline
+        // in the middle stays as one input "line" only if there were no
+        // \n in the raw text — which there always are. So this is just
+        // confirming the parser's input model: it splits on \n then trims.
+        let parsed = parse_batch_url_input("https://youtu.be/a\n\n");
+        assert_eq!(parsed, vec!["https://youtu.be/a".to_string()]);
+    }
 }

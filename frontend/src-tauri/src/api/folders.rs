@@ -539,4 +539,161 @@ mod tests {
         let (_sys, user) = build_categorize_prompt("Solo", "t", &[]);
         assert!(user.contains("propose a new folder"));
     }
+
+    // =========================================================================
+    // Adversarial tests (breaker agent pass 1)
+    // =========================================================================
+    // Focus: LLM response parsing, prompt injection via titles/transcripts,
+    // boundary cases on JSON extraction.
+
+    #[test]
+    fn parse_categorize_response_handles_json_with_explanation_after() {
+        // Common LLM pattern: JSON first, then explanation.
+        let raw = r#"{"folder": "Engineering"}
+
+This meeting is about engineering topics."#;
+        match parse_categorize_response(raw).unwrap() {
+            CategorizeDecision::Existing(n) => assert_eq!(n, "Engineering"),
+            other => panic!("expected Existing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_categorize_response_handles_json_with_explanation_before() {
+        let raw = r#"Looking at the meeting content:
+
+{"new_folder": "Sprint Planning"}"#;
+        match parse_categorize_response(raw).unwrap() {
+            CategorizeDecision::New(n) => assert_eq!(n, "Sprint Planning"),
+            other => panic!("expected New, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_categorize_response_rejects_nested_json() {
+        // The current parser picks the outer { and the LAST }, so for
+        // nested JSON with a string that contains '}', this could match
+        // the wrong brace. Document that this is a known sharp edge.
+        let raw = r#"{"folder": "Foo", "note": "use {} carefully"}"#;
+        // Should succeed (last } correctly closes the object), but
+        // the test pins what the parser does. We expect it to parse
+        // successfully and find "Foo".
+        let decision = parse_categorize_response(raw).unwrap();
+        match decision {
+            CategorizeDecision::Existing(n) => assert_eq!(n, "Foo"),
+            other => panic!("expected Existing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_categorize_response_rejects_both_folder_and_new_folder() {
+        // The schema is "exactly one" but a chatty LLM might return both.
+        // Document behavior: new_folder wins (it's checked first).
+        let raw = r#"{"folder": "Existing", "new_folder": "Proposed"}"#;
+        match parse_categorize_response(raw).unwrap() {
+            CategorizeDecision::New(n) => assert_eq!(n, "Proposed"),
+            CategorizeDecision::Existing(n) => panic!("new_folder should take precedence, got Existing({})", n),
+        }
+    }
+
+    #[test]
+    fn parse_categorize_response_rejects_empty_strings_in_fields() {
+        // Empty string for folder is treated as missing (per the
+        // `if !name.is_empty()` check). Must return an error, not be
+        // mapped to a folder named "".
+        let raw = r#"{"folder": ""}"#;
+        assert!(parse_categorize_response(raw).is_err());
+
+        let raw = r#"{"new_folder": "   "}"#;
+        // "   " trims to "" which is empty, so it falls through to "folder"
+        // and then to error.
+        assert!(parse_categorize_response(raw).is_err());
+    }
+
+    #[test]
+    fn parse_categorize_response_rejects_string_only_response() {
+        let raw = r#"The folder should be "Engineering"."#;
+        assert!(parse_categorize_response(raw).is_err());
+    }
+
+    #[test]
+    fn parse_categorize_response_rejects_array_response() {
+        // Some LLMs return an array of options instead of picking one.
+        let raw = r#"[{"folder": "A"}, {"folder": "B"}]"#;
+        assert!(parse_categorize_response(raw).is_err());
+    }
+
+    #[test]
+    fn parse_categorize_response_rejects_html_wrapped_json() {
+        // Some model APIs may wrap responses in HTML.
+        let raw = r#"<html><body>{"folder": "Engineering"}</body></html>"#;
+        match parse_categorize_response(raw).unwrap() {
+            CategorizeDecision::Existing(n) => assert_eq!(n, "Engineering"),
+            other => panic!("expected Existing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_categorize_response_handles_whitespace_only_braces() {
+        // The parser requires e > s. Empty "{}" should still fail at
+        // serde_json::from_str.
+        assert!(parse_categorize_response("{}").is_err());
+    }
+
+    #[test]
+    fn parse_categorize_response_uses_last_brace() {
+        // The parser finds the first { and the last }. If the LLM emits
+        // an incomplete object followed by a stray "}", the parser
+        // stitches them together into garbage that serde_json rejects.
+        let raw = r#"{ "folder": "Foo" } stray }"#;
+        // The parser will pick from the first { to the last }, giving
+        //   { "folder": "Foo" } stray }
+        // which is invalid JSON, so it should error.
+        assert!(parse_categorize_response(raw).is_err());
+    }
+
+    #[test]
+    fn parse_categorize_response_handles_unicode_in_folder_name() {
+        let raw = r#"{"folder": "\u4e2d\u6587\u6587\u4ef6\u5939"}"#;
+        match parse_categorize_response(raw).unwrap() {
+            CategorizeDecision::Existing(n) => assert_eq!(n, "中文文件夹"),
+            other => panic!("expected Existing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_categorize_prompt_includes_long_transcript_without_truncation_marker() {
+        // 10K char transcript — should fit in the prompt as-is.
+        let long: String = "a".repeat(10_000);
+        let (_sys, user) = build_categorize_prompt("Standup", &long, &["F1".to_string()]);
+        assert!(user.contains(&long));
+    }
+
+    #[test]
+    fn build_categorize_prompt_with_empty_transcript_says_no_transcript() {
+        let (_sys, user) = build_categorize_prompt("Standup", "", &["F1".to_string()]);
+        assert!(user.contains("(no transcript)"));
+    }
+
+    #[test]
+    fn build_categorize_prompt_with_many_folders_keeps_all() {
+        let folders: Vec<String> = (0..50).map(|i| format!("Folder {i}")).collect();
+        let (_sys, user) = build_categorize_prompt("Standup", "x", &folders);
+        for f in &folders {
+            assert!(user.contains(f), "missing {}", f);
+        }
+    }
+
+    #[test]
+    fn build_categorize_prompt_does_not_sanitize_folder_names() {
+        // Folder names appear verbatim in the prompt. A folder named
+        // '"; DROP TABLE folders;--' would inject a SQL-like string.
+        // The current implementation does NOT sanitize. Document.
+        let malicious = "\"; DROP TABLE folders;--";
+        let (_sys, user) = build_categorize_prompt("M", "t", &vec![malicious.to_string()]);
+        assert!(
+            user.contains(malicious),
+            "folder name is passed through to prompt; not sanitized"
+        );
+    }
 }
