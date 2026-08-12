@@ -665,6 +665,7 @@ pub fn run() {
             api::folders::api_ai_categorize_meeting,
             api::folders::api_ai_categorize_all_meetings,
             api::folders::api_get_meetings_with_folders,
+            api::folders::api_recommend_icon,
             // Custom OpenAI commands
             api::api_save_custom_openai_config,
             api::api_get_custom_openai_config,

@@ -9,10 +9,11 @@ use crate::{
         resolve_effective_model_name, resolve_provider_invocation, LiveLlmProviderInvocation,
     },
     database::{
-        models::FolderModel,
+        models::{FolderModel, TokenUsagePurpose},
         repositories::{
             folders::FoldersRepository, meeting::MeetingsRepository, setting::SettingsRepository,
         },
+        token_usage_recorder::record_token_usage,
     },
     state::AppState,
     summary::llm_client::{generate_summary, LLMProvider},
@@ -139,6 +140,93 @@ No prose, no markdown."
     );
 
     (system, user)
+}
+
+fn build_recommend_icon_prompt(name: &str, is_folder: bool) -> (String, String) {
+    let target_type = if is_folder { "folder" } else { "meeting" };
+    let system = "You are a UI icon recommendation assistant. \
+Given a item title/name, select the single best Lucide icon name from this exact list: \
+[scale, gamepad, book, heart, share, code, dollar, graduation-cap, users, briefcase, brain, lightbulb, film, music, shopping-bag, target, wrench, globe, shield, archive, kanban, file-text, building, cpu, folder]. \
+Reply with ONLY a JSON object: {\"icon\": \"<icon_name_from_list>\"}. No prose, no markdown.".to_string();
+
+    let user = format!("Recommend a Lucide icon for this {} name: \"{}\". Return JSON only.", target_type, name);
+    (system, user)
+}
+
+fn parse_recommend_icon_response(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let start = trimmed.find('{');
+    let end = trimmed.rfind('}');
+    let json_str = match (start, end) {
+        (Some(s), Some(e)) if e > s => &trimmed[s..=e],
+        _ => return Err("LLM response did not contain a JSON object".to_string()),
+    };
+
+    #[derive(Deserialize)]
+    struct Raw {
+        icon: Option<String>,
+    }
+
+    let parsed: Raw = serde_json::from_str(json_str)
+        .map_err(|e| format!("LLM JSON parse failed: {} (raw: {})", e, json_str))?;
+
+    if let Some(icon) = parsed.icon {
+        let icon = icon.trim().to_lowercase();
+        if !icon.is_empty() {
+            return Ok(icon);
+        }
+    }
+    Err("LLM response missing 'icon' field".to_string())
+}
+
+#[tauri::command]
+pub async fn api_recommend_icon<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    name: String,
+    is_folder: bool,
+) -> Result<String, String> {
+    let pool = state.db_manager.pool();
+    let invocation = match resolve_llm_invocation(pool).await {
+        Ok(inv) => inv,
+        Err(_) => return Ok("default".to_string()),
+    };
+
+    let (system_prompt, user_prompt) = build_recommend_icon_prompt(&name, is_folder);
+    let app_data_dir = app.path().app_data_dir().ok();
+    let client = Client::new();
+
+    let (raw, usage) = match generate_summary(
+        &client,
+        &invocation.provider,
+        &invocation.model_name,
+        &invocation.api_key,
+        &system_prompt,
+        &user_prompt,
+        invocation.ollama_endpoint.as_deref(),
+        invocation.custom_openai_endpoint.as_deref(),
+        invocation.custom_openai_max_tokens,
+        invocation.custom_openai_temperature,
+        invocation.custom_openai_top_p,
+        app_data_dir.as_ref(),
+        None,
+        None,
+    )
+    .await {
+        Ok(res) => (res.summary, res.usage),
+        Err(_) => return Ok("default".to_string()),
+    };
+
+    if let Some(usage) = usage {
+        record_token_usage(
+            pool.clone(),
+            None,
+            usage,
+            TokenUsagePurpose::RecommendIcon,
+        );
+    }
+
+    Ok(parse_recommend_icon_response(&raw).unwrap_or_else(|_| "default".to_string()))
 }
 
 fn parse_categorize_response(raw: &str) -> Result<CategorizeDecision, String> {

@@ -30,6 +30,7 @@ import {
 import { useRouter, usePathname } from 'next/navigation';
 import { useSidebar } from './SidebarProvider';
 import { FOLDER_ROOT_ID, type SidebarItem } from './folderTree';
+import { getFolderIcon, getMeetingIcon } from './getFolderIcon';
 import { ConfirmationModal } from '../ConfirmationModel/confirmation-modal';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { SettingTabs } from '../SettingTabs';
@@ -763,7 +764,7 @@ const Sidebar: React.FC = () => {
               {depth === 0 ? (
                 <NotebookPen className="w-4 h-4 mr-2 text-muted-foreground" />
               ) : isUserFolder ? (
-                <Folder className="w-4 h-4 mr-2 text-muted-foreground" />
+                getFolderIcon(item.title)
               ) : (
                 <Calendar className="w-4 h-4 mr-2 text-muted-foreground" />
               )}
@@ -801,7 +802,7 @@ const Sidebar: React.FC = () => {
               <div className="flex items-center w-full">
                 {isMeetingItem ? (
                   <div className="flex-shrink-0 flex items-center justify-center w-6 h-6 rounded-full mr-2 bg-secondary/10">
-                    <File className="w-3.5 h-3.5 text-muted-foreground" />
+                    {getMeetingIcon(item.title)}
                   </div>
                 ) : (
                   <div className="flex-shrink-0 flex items-center justify-center w-6 h-6 rounded-full mr-2 bg-primary/15">
@@ -1091,7 +1092,7 @@ const Sidebar: React.FC = () => {
       {/* Folder context menu */}
       {folderContextMenu && (
         <div
-          className="fixed z-50 min-w-[180px] rounded-lg border border-border/10 bg-secondary/95 backdrop-blur shadow-xl py-1 text-sm"
+          className="fixed z-50 min-w-[180px] rounded-lg border border-border/20 bg-background/95 text-popover-foreground backdrop-blur-md shadow-xl py-1 text-sm"
           style={{ left: folderContextMenu.x, top: folderContextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -1113,7 +1114,7 @@ const Sidebar: React.FC = () => {
                 });
               }
             }}
-            className="w-full text-left px-3 py-1.5 hover:bg-secondary/20 text-foreground"
+            className="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-accent-foreground text-popover-foreground disabled:opacity-50 disabled:hover:bg-transparent"
             disabled={!draggedMeetingId}
           >
             Move dragged meeting here
@@ -1133,7 +1134,7 @@ const Sidebar: React.FC = () => {
                 });
               }
             }}
-            className="w-full text-left px-3 py-1.5 hover:bg-secondary/20 text-foreground flex items-center gap-2"
+            className="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-accent-foreground text-popover-foreground flex items-center gap-2"
           >
             <Sparkles className="w-3.5 h-3.5" />
             Auto-categorize unfiled
@@ -1147,7 +1148,7 @@ const Sidebar: React.FC = () => {
               });
               setFolderContextMenu(null);
             }}
-            className="w-full text-left px-3 py-1.5 hover:bg-secondary/20 text-foreground"
+            className="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-accent-foreground text-popover-foreground"
           >
             Rename
           </button>
