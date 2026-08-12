@@ -672,13 +672,17 @@ fn build_live_transcript_context(transcript: &str, max_chars: usize) -> Result<S
 }
 
 /// Builds the multi-meeting LLM context block for `ask_across_meetings` from
-/// `(title, date, summary)` tuples, expected most-recent-first (matching
-/// `MeetingsRepository::get_meetings()`'s `ORDER BY created_at DESC`).
-/// Meetings without a summary yet are skipped entirely rather than falling
-/// back to raw transcript - summaries are the compact, already-bounded
-/// per-meeting context here. Blocks are appended in order until the next one
-/// would exceed `max_chars` (the first eligible block is always included in
-/// full even if it alone exceeds the budget, mirroring `build_recent_window`'s
+/// `(title, date, summary)` tuples, in the order the caller wants them
+/// prioritized - the function itself is order-agnostic and never inspects
+/// `date`. `ask_across_meetings` ranks meetings by relevance to the
+/// question before calling this (`order_meetings_by_relevance`), falling
+/// back to recency (`MeetingsRepository::get_meetings()`'s
+/// `ORDER BY created_at DESC`) when nothing scores above zero. Meetings
+/// without a summary yet are skipped entirely rather than falling back to
+/// raw transcript - summaries are the compact, already-bounded per-meeting
+/// context here. Blocks are appended in order until the next one would
+/// exceed `max_chars` (the first eligible block is always included in full
+/// even if it alone exceeds the budget, mirroring `build_recent_window`'s
 /// "most recent item always included" rule in `audio::recording_commands`);
 /// once the budget is hit, every remaining eligible meeting is counted as
 /// omitted and a trailing note is appended so both the LLM and, via its
@@ -693,7 +697,7 @@ fn build_cross_meeting_context(
     // so the two can never drift out of sync.
     let omission_note = |omitted: usize| -> String {
         format!(
-            "\n\n...and {} earlier meeting{} omitted for length.",
+            "\n\n...and {} other meeting{} omitted for length.",
             omitted,
             if omitted == 1 { "" } else { "s" }
         )
@@ -1245,13 +1249,69 @@ fn ask_across_meetings_char_budget(budget_tokens: usize) -> usize {
     tokens_to_chars(budget_tokens).max(ASK_ACROSS_MEETINGS_CONTEXT_MIN_CHARS)
 }
 
+/// Scores how relevant a meeting's `summary` looks for `question`: the
+/// count of `question`'s significant words (see `question_relevance_terms`)
+/// that appear in `summary`, case-insensitively. Not real search relevance -
+/// no stemming, no ranking model, just simple substring matching - only
+/// precise enough to prefer an on-topic meeting over an unrelated one when
+/// `ask_across_meetings` has to drop meetings for budget reasons. Pure/sync.
+fn score_meeting_relevance(question: &str, summary: &str) -> usize {
+    let summary_lower = summary.to_lowercase();
+    question_relevance_terms(question)
+        .filter(|term| summary_lower.contains(term.as_str()))
+        .count()
+}
+
+/// Splits `question` into the lowercase words `score_meeting_relevance`
+/// matches against a summary: alphanumeric runs of at least 3 characters,
+/// so short filler words ("a", "to", "is") don't count as a match against
+/// every summary.
+fn question_relevance_terms(question: &str) -> impl Iterator<Item = String> + '_ {
+    question
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(|w| w.to_lowercase())
+}
+
+/// Reorders `meetings` (as loaded by `ask_across_meetings`, most-recent-first)
+/// by relevance to `question` before they're handed to
+/// `build_cross_meeting_context`, which drops from the *end* of whatever
+/// order it's given once its budget runs out - so today's pure-recency order
+/// would always drop the oldest meetings even when an older one is the
+/// actual answer to the question. Sorts by descending
+/// `score_meeting_relevance`; `slice::sort_by`'s documented stability means
+/// meetings that score equally (most commonly: everyone scores 0, e.g. for a
+/// broad "summarize everything" question sharing no vocabulary with any
+/// summary) keep their original relative order, so this degrades exactly to
+/// today's recency behavior whenever the question has no distinguishing
+/// vocabulary. Pure/sync.
+fn order_meetings_by_relevance(
+    meetings: Vec<(String, String, Option<String>)>,
+    question: &str,
+) -> Vec<(String, String, Option<String>)> {
+    let mut scored: Vec<(usize, (String, String, Option<String>))> = meetings
+        .into_iter()
+        .map(|meeting| {
+            let score = score_meeting_relevance(question, meeting.2.as_deref().unwrap_or(""));
+            (score, meeting)
+        })
+        .collect();
+    scored.sort_by(|(score_a, _), (score_b, _)| score_b.cmp(score_a));
+    scored.into_iter().map(|(_, meeting)| meeting).collect()
+}
+
 /// Answers a free-text question that may span multiple meetings, using each
-/// meeting's stored summary as context for the app's configured LLM. Sizes
-/// its context budget dynamically from the resolved provider/model's actual
-/// context window (`resolve_ask_context_budget`) rather than a flat
-/// character cap, and - for Ollama specifically - forwards that model's
-/// resolved context size as `num_ctx` on the actual call, so the prompt this
-/// command builds and the window the model is told to use stay in sync.
+/// meeting's stored summary as context for the app's configured LLM. Ranks
+/// meetings by relevance to the question (`order_meetings_by_relevance`)
+/// before building the prompt, falling back to pure recency whenever no
+/// meeting's summary shares vocabulary with the question, so a relevant
+/// older meeting isn't silently dropped in favor of unrelated recent ones
+/// when the budget can't fit everything. Also sizes its context budget
+/// dynamically from the resolved provider/model's actual context window
+/// (`resolve_ask_context_budget`) rather than a flat character cap, and -
+/// for Ollama specifically - forwards that model's resolved context size as
+/// `num_ctx` on the actual call, so the prompt this command builds and the
+/// window the model is told to use stay in sync.
 #[tauri::command]
 pub async fn ask_across_meetings<R: Runtime>(
     app: AppHandle<R>,
@@ -1324,6 +1384,11 @@ pub async fn ask_across_meetings<R: Runtime>(
         meeting_summaries.iter().filter(|(_, _, s)| s.is_some()).count(),
         max_chars
     );
+
+    // Prioritize meetings whose summary looks relevant to the question over
+    // pure recency, so a relevant older meeting isn't the first thing
+    // dropped once the budget below runs out - see order_meetings_by_relevance.
+    let meeting_summaries = order_meetings_by_relevance(meeting_summaries, &question);
 
     let context = build_cross_meeting_context(&meeting_summaries, max_chars);
 
@@ -1526,10 +1591,11 @@ mod ask_ai_tests {
         assert!(context.contains("Meeting 0"));
         assert!(!context.contains("Meeting 1"));
         assert!(
-            context.contains("...and 4 earlier meetings omitted for length."),
+            context.contains("...and 4 other meetings omitted for length."),
             "expected omitted-count note in '{}'",
             context
         );
+        assert!(!context.contains("earlier"), "note should no longer claim chronology: '{}'", context);
     }
 
     #[test]
@@ -1547,7 +1613,7 @@ mod ask_ai_tests {
         let context = build_cross_meeting_context(&meetings, 60);
 
         assert!(
-            context.contains("...and 1 earlier meeting omitted for length."),
+            context.contains("...and 1 other meeting omitted for length."),
             "expected singular omitted note in '{}'",
             context
         );
@@ -1563,6 +1629,65 @@ mod ask_ai_tests {
         let context = build_cross_meeting_context(&meetings, 10);
         assert!(context.contains("Big meeting"));
         assert!(!context.contains("omitted"));
+    }
+
+    // ---- score_meeting_relevance / order_meetings_by_relevance ----
+
+    #[test]
+    fn score_meeting_relevance_zero_when_no_terms_match() {
+        assert_eq!(score_meeting_relevance("summarize everything", "Alpha summary content."), 0);
+    }
+
+    #[test]
+    fn score_meeting_relevance_matches_case_insensitively() {
+        let score =
+            score_meeting_relevance("What was the PRICING decision?", "We finalized pricing yesterday.");
+        assert!(score > 0);
+    }
+
+    #[test]
+    fn score_meeting_relevance_multiple_matches_outrank_single_match() {
+        let single =
+            score_meeting_relevance("What did we decide about pricing and roadmap?", "We only discussed pricing.");
+        let multiple = score_meeting_relevance(
+            "What did we decide about pricing and roadmap?",
+            "We discussed pricing and the roadmap timeline.",
+        );
+        assert!(multiple > single, "multiple ({}) should outrank single ({})", multiple, single);
+    }
+
+    #[test]
+    fn order_meetings_by_relevance_ranks_matching_meeting_above_non_matching() {
+        let meetings = vec![
+            (
+                "Recent unrelated".to_string(),
+                "2024-03-01".to_string(),
+                Some("We talked over lunch plans.".to_string()),
+            ),
+            (
+                "Old pricing meeting".to_string(),
+                "2024-01-01".to_string(),
+                Some("We finalized the pricing model for Q3.".to_string()),
+            ),
+        ];
+        let ordered = order_meetings_by_relevance(meetings, "What did we decide about pricing?");
+        assert_eq!(ordered[0].0, "Old pricing meeting", "the meeting matching 'pricing' should rank first");
+    }
+
+    /// The most common case: a broad question ("summarize everything") shares
+    /// no vocabulary with any summary, so every meeting scores 0. Ordering
+    /// must then exactly match the original (recency) order - this
+    /// regression-proofs the fallback to today's pure-recency behavior.
+    #[test]
+    fn order_meetings_by_relevance_falls_back_to_recency_when_no_terms_match() {
+        let meetings = vec![
+            ("Meeting A".to_string(), "2024-03-01".to_string(), Some("Alpha summary content.".to_string())),
+            ("Meeting B".to_string(), "2024-02-01".to_string(), Some("Beta summary content.".to_string())),
+            ("Meeting C".to_string(), "2024-01-01".to_string(), Some("Gamma summary content.".to_string())),
+        ];
+        let original = meetings.clone();
+        let ordered = order_meetings_by_relevance(meetings, "summarize everything");
+        assert_eq!(ordered, original);
     }
 
     #[test]
