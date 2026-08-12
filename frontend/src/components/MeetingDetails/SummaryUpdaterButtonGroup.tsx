@@ -2,7 +2,7 @@
 
 import { Button } from '@/components/ui/button';
 import { headerTileClass } from './toolbarStyles';
-import { Copy, Save, Loader2, Search, FolderOpen } from 'lucide-react';
+import { Copy, Save, Loader2, Search, FolderOpen, Trash2 } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { cn } from '@/lib/utils';
 
@@ -13,6 +13,7 @@ interface SummaryUpdaterButtonGroupProps {
   onCopy: () => Promise<void>;
   onFind?: () => void;
   onOpenFolder: () => Promise<void>;
+  onDelete?: () => void;
   hasSummary: boolean;
 }
 
@@ -23,6 +24,7 @@ export function SummaryUpdaterButtonGroup({
   onCopy,
   onFind,
   onOpenFolder,
+  onDelete,
   hasSummary
 }: SummaryUpdaterButtonGroupProps) {
   return (
@@ -57,23 +59,21 @@ export function SummaryUpdaterButtonGroup({
         <Copy />
       </Button>
 
-      {/* Find button */}
-      {/* {onFind && (
+      {onDelete && (
         <Button
-          variant="outline"
-          size="sm"
-          title="Find in Summary"
+          variant="ghost"
+          size="icon"
+          title="Delete Meeting"
+          aria-label="Delete Meeting"
           onClick={() => {
-            Analytics.trackButtonClick('find_in_summary', 'meeting_details');
-            onFind();
+            Analytics.trackButtonClick('delete_meeting', 'meeting_details');
+            onDelete();
           }}
-          disabled={!hasSummary}
-          className="cursor-pointer"
+          className={cn(headerTileClass, 'cursor-pointer hover:bg-destructive/15 hover:text-destructive')}
         >
-          <Search />
-          <span className="hidden lg:inline">Find</span>
+          <Trash2 className="w-4.5 h-4.5 text-muted-foreground hover:text-destructive" />
         </Button>
-      )} */}
+      )}
     </div>
   );
 }

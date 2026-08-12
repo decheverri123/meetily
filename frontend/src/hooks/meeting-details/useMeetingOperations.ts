@@ -20,7 +20,21 @@ export function useMeetingOperations({
     }
   }, [meeting.id]);
 
+  // Delete meeting
+  const handleDeleteMeeting = useCallback(async () => {
+    try {
+      await invokeTauri('api_delete_meeting', { meetingId: meeting.id });
+      toast.success('Meeting deleted successfully');
+      return true;
+    } catch (error) {
+      console.error('Failed to delete meeting:', error);
+      toast.error(typeof error === 'string' ? error : 'Failed to delete meeting');
+      return false;
+    }
+  }, [meeting.id]);
+
   return {
     handleOpenMeetingFolder,
+    handleDeleteMeeting,
   };
 }

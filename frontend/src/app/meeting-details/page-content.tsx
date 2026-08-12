@@ -22,6 +22,9 @@ import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
 import { useConfig } from '@/contexts/ConfigContext';
 
+import { useRouter } from 'next/navigation';
+import { ConfirmationModal } from '@/components/ConfirmationModel/confirmation-modal';
+
 export default function PageContent({
   meeting,
   summaryData,
@@ -68,12 +71,15 @@ export default function PageContent({
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(true);
   const [citedSegmentIds, setCitedSegmentIds] = useState<string[]>([]);
   const [focusSegment, setFocusSegment] = useState<{ id: string } | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+
+  const router = useRouter();
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
   const openModelSettingsRef = useRef<(() => void) | null>(null);
 
   // Sidebar context
-  const { serverAddress } = useSidebar();
+  const { serverAddress, refetchMeetings, setCurrentMeeting } = useSidebar();
 
   // Get model config from ConfigContext
   const { modelConfig, setModelConfig } = useConfig();
@@ -146,6 +152,16 @@ export default function PageContent({
   const meetingOperations = useMeetingOperations({
     meeting,
   });
+
+  const handleConfirmDeleteMeeting = async () => {
+    setIsDeleteModalOpen(false);
+    const success = await meetingOperations.handleDeleteMeeting();
+    if (success) {
+      refetchMeetings();
+      setCurrentMeeting({ id: 'intro-call', title: '+ New Call' });
+      router.push('/');
+    }
+  };
 
   useAskPanelShortcut(useCallback(() => setShowAskPanel(open => !open), []));
 
@@ -267,6 +283,7 @@ export default function PageContent({
           onTemplateSelect={templates.handleTemplateSelection}
           isModelConfigLoading={false}
           onOpenModelSettings={handleRegisterModalOpen}
+          onDeleteMeeting={async () => setIsDeleteModalOpen(true)}
         />
         {/* Mirrors TranscriptPanel's own collapse animation: stays mounted at
             its full width while the outer clip narrows to a rail, so the
@@ -301,6 +318,13 @@ export default function PageContent({
           />
         </div>
       </div>
+
+      <ConfirmationModal
+        isOpen={isDeleteModalOpen}
+        text="Are you sure you want to delete this meeting? All associated transcripts and summaries will be permanently deleted."
+        onConfirm={handleConfirmDeleteMeeting}
+        onCancel={() => setIsDeleteModalOpen(false)}
+      />
     </motion.div>
   );
 }

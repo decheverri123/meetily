@@ -113,6 +113,26 @@ export default function RootLayout({
       return () => document.removeEventListener('contextmenu', handleContextMenu);
     }
   }, []);
+
+  // Support mouse back (button 3 / X1) and forward (button 4 / X2) page navigation
+  useEffect(() => {
+    const handleMouseNav = (e: MouseEvent) => {
+      if (e.button === 3) {
+        e.preventDefault();
+        window.history.back();
+      } else if (e.button === 4) {
+        e.preventDefault();
+        window.history.forward();
+      }
+    };
+
+    window.addEventListener('mouseup', handleMouseNav);
+    window.addEventListener('auxclick', handleMouseNav);
+    return () => {
+      window.removeEventListener('mouseup', handleMouseNav);
+      window.removeEventListener('auxclick', handleMouseNav);
+    };
+  }, []);
   useEffect(() => {
     // Listen for tray recording toggle request
     const unlisten = listen('request-recording-toggle', () => {

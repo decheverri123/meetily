@@ -61,6 +61,7 @@ interface SummaryPanelProps {
   onTemplateSelect: (templateId: string, templateName: string) => void;
   isModelConfigLoading?: boolean;
   onOpenModelSettings?: (openFn: () => void) => void;
+  onDeleteMeeting?: () => Promise<void>;
 }
 
 export function SummaryPanel({
@@ -76,6 +77,7 @@ export function SummaryPanel({
   onSaveAll,
   onCopySummary,
   onOpenFolder,
+  onDeleteMeeting,
   aiSummary,
   summaryStatus,
   transcripts,
@@ -296,6 +298,7 @@ export function SummaryPanel({
                   console.log('Find in summary clicked');
                 }}
                 onOpenFolder={onOpenFolder}
+                onDelete={onDeleteMeeting}
                 hasSummary={!!aiSummary}
               />
             </div>
