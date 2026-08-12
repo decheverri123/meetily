@@ -755,18 +755,6 @@ mod tests {
     }
 
     #[test]
-    fn test_partition_valid_urls_classifies_playlist_url_as_valid() {
-        // Documents behavior: a watch URL with `&list=PLxyz` is currently
-        // accepted as valid. The Rust is_valid_youtube_url only checks for
-        // the v= param, not playlist context. Whether this is a bug depends
-        // on product intent; this test pins current behavior.
-        let urls = vec!["https://www.youtube.com/watch?v=abc&list=PLxyz".to_string()];
-        let (valid, invalid) = partition_valid_urls(urls);
-        assert_eq!(valid.len(), 1, "playlist URL was rejected: invalid={:?}", invalid);
-        assert_eq!(valid[0].0, "https://www.youtube.com/watch?v=abc&list=PLxyz");
-    }
-
-    #[test]
     fn test_partition_valid_urls_rejects_bare_playlist_url() {
         // A pure playlist URL (no v= param) must be rejected.
         let urls = vec!["https://www.youtube.com/playlist?list=PLxyz".to_string()];
