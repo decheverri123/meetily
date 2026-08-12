@@ -78,3 +78,5 @@ experiments/
 target/
 
 frontend/src-tauri/binaries/
+
+.worktrees/
