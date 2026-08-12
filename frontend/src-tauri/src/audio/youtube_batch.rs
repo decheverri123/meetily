@@ -15,7 +15,10 @@ use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use super::common::{release_batch_import, try_acquire_batch_import, unload_engine_after_batch};
+use super::common::{
+    release_batch_import, try_acquire_batch_import, unload_engine_after_batch,
+    YOUTUBE_IMPORT_IN_PROGRESS,
+};
 use super::import::ImportStarted;
 use super::import_pipeline::get_configured_provider;
 use super::youtube_import::{
@@ -306,7 +309,7 @@ pub async fn start_youtube_batch_import_command<R: Runtime>(
     let total = valid.len();
     let batch_id = Uuid::new_v4().to_string();
 
-    try_acquire_batch_import(&super::common::YOUTUBE_IMPORT_IN_PROGRESS)?;
+    try_acquire_batch_import(&YOUTUBE_IMPORT_IN_PROGRESS)?;
     YOUTUBE_IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
     let aggregator = BatchAggregator::new(valid.clone());
@@ -452,7 +455,7 @@ pub async fn start_youtube_batch_import_command<R: Runtime>(
             let mut guard = BATCH_STATE.lock().await;
             *guard = None;
         }
-        release_batch_import(&super::common::YOUTUBE_IMPORT_IN_PROGRESS);
+        release_batch_import(&YOUTUBE_IMPORT_IN_PROGRESS);
 
         let use_parakeet = provider == "parakeet";
         unload_engine_after_batch(use_parakeet).await;
