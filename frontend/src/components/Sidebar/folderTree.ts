@@ -16,11 +16,20 @@ export function buildSidebarTree(
   folders: Folder[],
   meetings: MeetingWithFolder[]
 ): SidebarItem[] {
+  // Normalize at the API boundary: some backends return `folder_id: ""`
+  // instead of `null` for unfiled meetings. `"" == null` is false, so a
+  // meeting with an empty string wouldn't be classified as unfiled and
+  // would also not match any folder — silently dropping it from the tree.
+  const normalizedMeetings = meetings.map((m) => ({
+    ...m,
+    folder_id: m.folder_id === "" ? null : m.folder_id,
+  }));
+
   const folderItems: SidebarItem[] = folders
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
     .map((f) => {
-      const children = meetings
+      const children = normalizedMeetings
         .filter((m) => m.folder_id === f.id)
         .map((m) => ({
           id: `m:${m.id}`,
@@ -38,7 +47,7 @@ export function buildSidebarTree(
       };
     });
 
-  const unfiledMeetings = meetings.filter((m) => m.folder_id == null);
+  const unfiledMeetings = normalizedMeetings.filter((m) => m.folder_id == null);
   const unfiledChildren: SidebarItem[] = unfiledMeetings.map((m) => ({
     id: `m:${m.id}`,
     title: m.title,
