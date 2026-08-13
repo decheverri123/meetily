@@ -687,6 +687,7 @@ pub fn run() {
             // Free-text meeting Q&A ("ask about this meeting" / "ask across meetings")
             summary::commands::ask_about_meeting,
             summary::commands::ask_across_meetings,
+            summary::commands::ask_about_folder,
             summary::commands::ask_about_live_transcript,
             summary::commands::suggest_live_transcript_questions,
             summary::commands::suggest_meeting_questions,

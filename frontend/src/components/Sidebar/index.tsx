@@ -54,6 +54,7 @@ import { VisuallyHidden } from "@/components/ui/visually-hidden"
 import { MessageToast } from '../MessageToast';
 import Logo from '../Logo';
 import { GlobalAskPanel } from './GlobalAskPanel';
+import { FolderAskPanel } from './FolderAskPanel';
 import Info from '../Info';
 import { ComplianceNotification } from '../ComplianceNotification';
 import { Input } from '../ui/input';
@@ -95,6 +96,7 @@ const Sidebar: React.FC = () => {
     x: number;
     y: number;
   } | null>(null);
+  const [folderAskTarget, setFolderAskTarget] = useState<{ folderId: string; folderName: string } | null>(null);
   const [createFolderModalOpen, setCreateFolderModalOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [renameFolderModal, setRenameFolderModal] = useState<{
@@ -1001,6 +1003,22 @@ const Sidebar: React.FC = () => {
           </div>
         </div>
 
+        {/* Folder Ask Panel */}
+        {folderAskTarget && !isCollapsed && (
+          <div className="flex-shrink-0 border-t border-border/10 px-4 py-3">
+            <FolderAskPanel
+              folderId={folderAskTarget.folderId}
+              folderName={folderAskTarget.folderName}
+            />
+            <button
+              onClick={() => setFolderAskTarget(null)}
+              className="mt-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Close
+            </button>
+          </div>
+        )}
+
         {/* Footer */}
         {!isCollapsed && (
 
@@ -1125,6 +1143,20 @@ const Sidebar: React.FC = () => {
           style={{ left: folderContextMenu.x, top: folderContextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
+          <button
+            onClick={() => {
+              setFolderAskTarget({
+                folderId: folderContextMenu.folderId,
+                folderName: folderContextMenu.folderName,
+              });
+              setFolderContextMenu(null);
+            }}
+            className="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-accent-foreground text-popover-foreground flex items-center gap-2"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            Ask this folder
+          </button>
+          <div className="my-1 border-t border-border/10" />
           <button
             onClick={async () => {
               const meetingId = draggedMeetingId;

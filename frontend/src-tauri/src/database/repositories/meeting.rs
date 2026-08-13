@@ -15,6 +15,25 @@ impl MeetingsRepository {
         Ok(meetings)
     }
 
+    pub async fn get_meetings_by_ids(
+        pool: &SqlitePool,
+        ids: &[String],
+    ) -> Result<Vec<MeetingModel>, sqlx::Error> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
+        let query = format!(
+            "SELECT * FROM meetings WHERE id IN ({}) ORDER BY created_at DESC",
+            placeholders.join(",")
+        );
+        let mut q = sqlx::query_as::<_, MeetingModel>(&query);
+        for id in ids {
+            q = q.bind(id);
+        }
+        q.fetch_all(pool).await
+    }
+
     pub async fn delete_meeting(pool: &SqlitePool, meeting_id: &str) -> Result<bool, SqlxError> {
         if meeting_id.trim().is_empty() {
             return Err(SqlxError::Protocol(

@@ -152,6 +152,21 @@ impl FoldersRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    pub async fn get_meeting_ids_in_folder(
+        pool: &SqlitePool,
+        folder_id: &str,
+    ) -> Result<Vec<String>, SqlxError> {
+        if folder_id.trim().is_empty() {
+            return Err(SqlxError::Protocol("folder_id cannot be empty".to_string()));
+        }
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM meetings WHERE meeting_folder_id = ? ORDER BY created_at DESC")
+                .bind(folder_id)
+                .fetch_all(pool)
+                .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
     pub async fn unfiled_meeting_ids(pool: &SqlitePool) -> Result<Vec<String>, SqlxError> {
         let rows: Vec<(String,)> =
             sqlx::query_as("SELECT id FROM meetings WHERE meeting_folder_id IS NULL")

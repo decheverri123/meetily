@@ -1474,6 +1474,125 @@ pub async fn ask_across_meetings<R: Runtime>(
     .await
 }
 
+/// Answers a free-text question about meetings in a specific folder, using
+/// each meeting's stored summary as context for the app's configured LLM.
+/// Reuses the same context-budgeting, relevance-ranking, and prompt-building
+/// logic as `ask_across_meetings`, but filters meetings to only those in the
+/// specified folder.
+#[tauri::command]
+pub async fn ask_about_folder<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    folder_id: String,
+    question: String,
+) -> Result<String, String> {
+    use crate::database::repositories::folders::FoldersRepository;
+
+    log_info!("ask_about_folder called for folder_id: {}", folder_id);
+
+    let question = validate_ask_question(&question)?;
+    let pool = state.db_manager.pool();
+
+    // Verify the folder exists
+    let folder = FoldersRepository::get_folder(pool, &folder_id)
+        .await
+        .map_err(|e| format!("Failed to load folder: {}", e))?
+        .ok_or_else(|| "Folder not found.".to_string())?;
+
+    // Get meeting IDs in this folder
+    let meeting_ids = FoldersRepository::get_meeting_ids_in_folder(pool, &folder_id)
+        .await
+        .map_err(|e| format!("Failed to list meetings in folder: {}", e))?;
+
+    if meeting_ids.is_empty() {
+        log_info!("ask_about_folder: no meetings in folder '{}'", folder.name);
+        return Ok(format!("No meetings in folder '{}' yet.", folder.name));
+    }
+
+    // Load meetings in this folder via a single targeted query (not N+1,
+    // not a full table scan).
+    let meetings = MeetingsRepository::get_meetings_by_ids(pool, &meeting_ids)
+        .await
+        .map_err(|e| format!("Failed to load meetings: {}", e))?;
+
+    if meetings.is_empty() {
+        return Ok(format!("No meetings found in folder '{}'.", folder.name));
+    }
+
+    // Batch-load summaries
+    let summary_results =
+        SummaryProcessesRepository::get_summary_results_for_meetings(pool, &meeting_ids)
+            .await
+            .map_err(|e| {
+                log_error!("ask_about_folder: failed to batch-load summaries: {}", e);
+                format!("Failed to load meeting summaries: {}", e)
+            })?;
+
+    let meeting_summaries: Vec<(String, String, Option<String>)> = meetings
+        .iter()
+        .map(|meeting| {
+            let summary = summary_results
+                .get(&meeting.id)
+                .and_then(|raw| extract_markdown_from_result_json(raw));
+            (meeting.title.clone(), meeting.created_at.0.to_rfc3339(), summary)
+        })
+        .collect();
+
+    // Check if any summaries are usable
+    if !meeting_summaries.iter().any(|(_, _, summary)| summary.is_some()) {
+        log_info!("ask_about_folder: no usable summaries in folder '{}'", folder.name);
+        return Ok(format!(
+            "No meeting summaries available in folder '{}' yet to answer from.",
+            folder.name
+        ));
+    }
+
+    // Resolve LLM plan for context sizing (same as ask_across_meetings)
+    let plan_result = resolve_ask_llm_plan(&app).await;
+    let (max_chars, ollama_num_ctx) = match &plan_result {
+        Ok(plan) => {
+            let budget = resolve_ask_context_budget(plan).await;
+            (
+                resolve_ask_across_meetings_char_budget(plan, budget.budget_tokens),
+                budget.raw_context_tokens,
+            )
+        }
+        Err(e) => {
+            log_warn!(
+                "ask_about_folder: failed to resolve LLM plan for context sizing, falling back to fixed budget: {}",
+                e
+            );
+            (ASK_ACROSS_MEETINGS_CONTEXT_MAX_CHARS, None)
+        }
+    };
+
+    log_info!(
+        "ask_about_folder: folder '{}' has {} meetings, {} with a usable summary, context budget {} chars",
+        folder.name,
+        meetings.len(),
+        meeting_summaries.iter().filter(|(_, _, s)| s.is_some()).count(),
+        max_chars
+    );
+
+    // Prioritize by relevance
+    let meeting_summaries = order_meetings_by_relevance(meeting_summaries, &question);
+
+    let context = build_cross_meeting_context(&meeting_summaries, max_chars);
+    let user_prompt = format!("{}\n\nQuestion: {}", context, question);
+
+    let plan = plan_result?;
+    call_ask_llm_plan(
+        plan,
+        pool.clone(),
+        ASK_ACROSS_MEETINGS_SYSTEM_PROMPT,
+        &user_prompt,
+        ollama_num_ctx,
+        None,
+        TokenUsagePurpose::QaGlobal,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod ask_ai_tests {
     use super::*;
@@ -2325,5 +2444,20 @@ Connection: close
             max_chars,
             context
         );
+    }
+
+    // ---- ask_about_folder ----
+
+    /// ask_about_folder reuses the same shared question validation as every
+    /// other ask command; an empty or over-length question is rejected before
+    /// any DB or LLM call.
+    #[test]
+    fn ask_about_folder_reuses_shared_question_validation() {
+        assert!(validate_ask_question("").is_err());
+        assert!(validate_ask_question("   ").is_err());
+        assert!(
+            validate_ask_question(&"a".repeat(ASK_QUESTION_MAX_CHARS + 1)).is_err()
+        );
+        assert!(validate_ask_question("What was decided?").is_ok());
     }
 }
