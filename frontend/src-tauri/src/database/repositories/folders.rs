@@ -73,6 +73,7 @@ impl FoldersRepository {
             name: trimmed.to_string(),
             created_at: crate::database::models::DateTimeUtc::from(now),
             updated_at: crate::database::models::DateTimeUtc::from(now),
+            icon: None,
         })
     }
 
@@ -140,6 +141,25 @@ impl FoldersRepository {
                 .fetch_all(pool)
                 .await?;
         Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    pub async fn update_folder_icon(
+        pool: &SqlitePool,
+        folder_id: &str,
+        icon: &str,
+    ) -> Result<bool, SqlxError> {
+        if folder_id.trim().is_empty() {
+            return Err(SqlxError::Protocol("folder_id cannot be empty".to_string()));
+        }
+
+        let now = Utc::now().naive_utc();
+        let result = sqlx::query("UPDATE folders SET icon = ?, updated_at = ? WHERE id = ?")
+            .bind(icon.trim())
+            .bind(now)
+            .bind(folder_id)
+            .execute(pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 }
 

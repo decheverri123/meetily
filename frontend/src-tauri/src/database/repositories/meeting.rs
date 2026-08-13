@@ -62,7 +62,7 @@ impl MeetingsRepository {
 
         // Get meeting details
         let meeting: Option<MeetingModel> =
-            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path, meeting_folder_id FROM meetings WHERE id = ?")
+            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path, meeting_folder_id, icon FROM meetings WHERE id = ?")
                 .bind(meeting_id)
                 .fetch_optional(&mut *transaction)
                 .await?;
@@ -120,7 +120,7 @@ impl MeetingsRepository {
         }
 
         let meeting: Option<MeetingModel> =
-            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path, meeting_folder_id FROM meetings WHERE id = ?")
+            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path, meeting_folder_id, icon FROM meetings WHERE id = ?")
                 .bind(meeting_id)
                 .fetch_optional(pool)
                 .await?;
@@ -253,13 +253,44 @@ impl MeetingsRepository {
                 .bind(now)
                 .bind(meeting_id)
                 .execute(&mut *transaction)
-                .await?;
-        if rows_affected.rows_affected() == 0 {
+                .await?
+                .rows_affected();
+        if rows_affected == 0 {
             transaction.rollback().await?;
             return Ok(false);
         }
         transaction.commit().await?;
         Ok(true)
+    }
+
+    pub async fn update_meeting_icon(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        icon: &str,
+    ) -> Result<bool, SqlxError> {
+        if meeting_id.trim().is_empty() {
+            return Err(SqlxError::Protocol(
+                "meeting_id cannot be empty".to_string(),
+            ));
+        }
+
+        let mut conn = pool.acquire().await?;
+        let mut transaction = conn.begin().await?;
+
+        let now = Utc::now().naive_utc();
+
+        let rows_affected =
+            sqlx::query("UPDATE meetings SET icon = ?, updated_at = ? WHERE id = ?")
+                .bind(icon.trim())
+                .bind(now)
+                .bind(meeting_id)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected();
+
+        transaction.commit().await?;
+
+        Ok(rows_affected > 0)
     }
 
     pub async fn update_meeting_name(

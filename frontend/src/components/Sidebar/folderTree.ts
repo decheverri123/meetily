@@ -4,6 +4,7 @@ export interface SidebarItem {
   id: string;
   title: string;
   type: 'folder' | 'file';
+  icon?: string;
   children?: SidebarItem[];
   meetingId?: string;
   folderId?: string;
@@ -35,6 +36,7 @@ export function buildSidebarTree(
           id: `m:${m.id}`,
           title: m.title,
           type: 'file' as const,
+          icon: m.icon,
           meetingId: m.id,
           folderId: f.id,
         }));
@@ -42,6 +44,7 @@ export function buildSidebarTree(
         id: `f:${f.id}`,
         title: f.name,
         type: 'folder' as const,
+        icon: f.icon,
         children: children,
         folderId: f.id,
       };
@@ -52,6 +55,7 @@ export function buildSidebarTree(
     id: `m:${m.id}`,
     title: m.title,
     type: 'file' as const,
+    icon: m.icon,
     meetingId: m.id,
   }));
 

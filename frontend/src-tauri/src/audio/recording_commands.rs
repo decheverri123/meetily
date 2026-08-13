@@ -2087,17 +2087,15 @@ async fn generate_bounded_live_llm_text(
                 Some(&app_data_dir),
                 Some(&cancellation_token),
                 None,
+                app.try_state::<AppState>().map(|s| crate::summary::llm_client::TokenUsageContext {
+                    pool: s.db_manager.pool().clone(),
+                    meeting_id: None,
+                    purpose,
+                }),
             )
             .await
             {
                 Ok(output) => {
-                    if let Some(usage) = output.usage {
-                        if let Some(pool) =
-                            app.try_state::<AppState>().map(|s| s.db_manager.pool().clone())
-                        {
-                            record_token_usage(pool, None, usage, purpose);
-                        }
-                    }
                     Ok(output.summary)
                 }
                 Err(e) => Err(e),

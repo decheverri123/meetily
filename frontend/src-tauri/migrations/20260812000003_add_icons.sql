@@ -1,0 +1,2 @@
+ALTER TABLE folders ADD COLUMN icon TEXT;
+ALTER TABLE meetings ADD COLUMN icon TEXT;

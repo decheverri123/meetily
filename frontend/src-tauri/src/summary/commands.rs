@@ -957,6 +957,11 @@ async fn call_ask_llm_plan(
                 Some(&app_data_dir),
                 None,
                 None,
+                Some(crate::summary::llm_client::TokenUsageContext {
+                    pool: pool.clone(),
+                    meeting_id: meeting_id.map(str::to_string),
+                    purpose,
+                }),
             )
             .await
         }
@@ -976,6 +981,11 @@ async fn call_ask_llm_plan(
                 None,
                 None,
                 ollama_num_ctx,
+                Some(crate::summary::llm_client::TokenUsageContext {
+                    pool: pool.clone(),
+                    meeting_id: meeting_id.map(str::to_string),
+                    purpose,
+                }),
             )
             .await
         }
@@ -985,15 +995,6 @@ async fn call_ask_llm_plan(
         log_error!("call_ask_llm_plan: LLM provider call failed: {}", e);
         ASK_LLM_GENERIC_ERROR.to_string()
     })?;
-
-    if let Some(usage) = output.usage {
-        record_token_usage(
-            pool,
-            meeting_id.map(str::to_string),
-            usage,
-            purpose,
-        );
-    }
 
     Ok(output.summary)
 }

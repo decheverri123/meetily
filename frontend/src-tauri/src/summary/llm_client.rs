@@ -5,6 +5,11 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::database::{
+    models::TokenUsagePurpose,
+    token_usage_recorder::record_token_usage,
+};
+
 const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(300);
 
 // Generic structure for OpenAI-compatible API chat messages
@@ -150,6 +155,12 @@ pub struct GenerateSummaryOutput {
     pub usage: Option<LLMUsage>,
 }
 
+pub struct TokenUsageContext {
+    pub pool: sqlx::SqlitePool,
+    pub meeting_id: Option<String>,
+    pub purpose: TokenUsagePurpose,
+}
+
 impl LLMProvider {
     /// String identifier used for persistence (token_usage row, pricing lookup).
     /// Mirrors the `from_str` arms exactly so round-tripping is safe.
@@ -221,6 +232,7 @@ pub async fn generate_summary(
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
     num_ctx: Option<u32>,
+    usage_context: Option<TokenUsageContext>,
 ) -> Result<GenerateSummaryOutput, String> {
     // Check if cancelled before starting
     if let Some(token) = cancellation_token {
@@ -249,7 +261,7 @@ pub async fn generate_summary(
         ) as i64;
         let completion_tokens = crate::summary::processor::rough_token_count(&summary) as i64;
 
-        return Ok(GenerateSummaryOutput {
+        let output = GenerateSummaryOutput {
             summary,
             usage: Some(LLMUsage {
                 provider: LLMProvider::BuiltInAI,
@@ -258,7 +270,13 @@ pub async fn generate_summary(
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
             }),
-        });
+        };
+
+        if let (Some(usage), Some(ctx)) = (&output.usage, usage_context) {
+            record_token_usage(ctx.pool, ctx.meeting_id, usage.clone(), ctx.purpose);
+        }
+
+        return Ok(output);
     }
 
     let (api_url, mut headers) = match provider {
@@ -443,7 +461,7 @@ pub async fn generate_summary(
     }
 
     // Parse response based on provider
-    if provider == &LLMProvider::Claude {
+    let output = if provider == &LLMProvider::Claude {
         let chat_response = response
             .json::<ClaudeChatResponse>()
             .await
@@ -464,10 +482,10 @@ pub async fn generate_summary(
             completion_tokens: u.output_tokens,
             total_tokens: u.input_tokens + u.output_tokens,
         });
-        Ok(GenerateSummaryOutput {
+        GenerateSummaryOutput {
             summary: content.to_string(),
             usage,
-        })
+        }
     } else if provider == &LLMProvider::Ollama {
         // Ollama's native /api/chat doesn't always return usage; fine to
         // emit `usage: None` here - the OpenAI-compat path below covers
@@ -479,10 +497,10 @@ pub async fn generate_summary(
 
         info!("🐞 LLM Response received from {}", provider_name(provider));
 
-        Ok(GenerateSummaryOutput {
+        GenerateSummaryOutput {
             summary: chat_response.message.content.trim().to_string(),
             usage: None,
-        })
+        }
     } else {
         let chat_response = response
             .json::<ChatResponse>()
@@ -505,11 +523,17 @@ pub async fn generate_summary(
             completion_tokens: u.completion_tokens,
             total_tokens: u.total_tokens,
         });
-        Ok(GenerateSummaryOutput {
+        GenerateSummaryOutput {
             summary: content.to_string(),
             usage,
-        })
+        }
+    };
+
+    if let (Some(usage), Some(ctx)) = (&output.usage, usage_context) {
+        record_token_usage(ctx.pool, ctx.meeting_id, usage.clone(), ctx.purpose);
     }
+
+    Ok(output)
 }
 
 /// Helper function to get provider name for logging (and, per callers outside
@@ -593,6 +617,7 @@ mod num_ctx_wire_format_tests {
             None,
             None,
             Some(32768), // the resolved model's real context window
+            None,
         )
         .await;
 
@@ -659,6 +684,7 @@ mod num_ctx_wire_format_tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -702,6 +728,7 @@ mod num_ctx_wire_format_tests {
             None,
             None,
             Some(0),
+            None,
         )
         .await;
 
@@ -743,6 +770,7 @@ mod num_ctx_wire_format_tests {
             None,
             None,
             Some(32768),
+            None,
         )
         .await;
 

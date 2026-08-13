@@ -77,7 +77,7 @@ describe('AskMeetingPanel adversarial', () => {
 
     console.error = originalError;
 
-    const stateUpdateWarning = errors.find(argSet =>
+    const stateUpdateWarning = errors.find((argSet: any) =>
       String(argSet[0]).includes('unmounted component')
     );
     expect(stateUpdateWarning).toBeUndefined();

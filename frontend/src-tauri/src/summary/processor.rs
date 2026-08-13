@@ -432,18 +432,15 @@ pub async fn generate_meeting_summary(
                     app_data_dir,
                     cancellation_token,
                     None,
+                    Some(crate::summary::llm_client::TokenUsageContext {
+                        pool: pool.clone(),
+                        meeting_id: Some(meeting_id.to_string()),
+                        purpose: TokenUsagePurpose::SummaryChunk,
+                    }),
                 )
                 .await
                 {
                     Ok(output) => {
-                        if let Some(usage) = output.usage {
-                            record_token_usage(
-                                pool.clone(),
-                                Some(meeting_id.to_string()),
-                                usage,
-                                TokenUsagePurpose::SummaryChunk,
-                            );
-                        }
                         chunk_summaries.push(output.summary);
                         info!("✓ Chunk {}/{} processed successfully", i + 1, num_chunks);
                     }
@@ -494,16 +491,13 @@ pub async fn generate_meeting_summary(
                     app_data_dir,
                     cancellation_token,
                     None,
+                    Some(crate::summary::llm_client::TokenUsageContext {
+                        pool: pool.clone(),
+                        meeting_id: Some(meeting_id.to_string()),
+                        purpose: TokenUsagePurpose::SummaryCombine,
+                    }),
                 )
                 .await?;
-                if let Some(usage) = combine_output.usage {
-                    record_token_usage(
-                        pool.clone(),
-                        Some(meeting_id.to_string()),
-                        usage,
-                        TokenUsagePurpose::SummaryCombine,
-                    );
-                }
                 combine_output.summary
             } else {
                 chunk_summaries.remove(0)
@@ -552,16 +546,13 @@ pub async fn generate_meeting_summary(
             app_data_dir,
             cancellation_token,
             None,
+            Some(crate::summary::llm_client::TokenUsageContext {
+                pool: pool.clone(),
+                meeting_id: Some(meeting_id.to_string()),
+                purpose: TokenUsagePurpose::SummaryFinal,
+            }),
         )
         .await?;
-        if let Some(usage) = final_output.usage {
-            record_token_usage(
-                pool.clone(),
-                Some(meeting_id.to_string()),
-                usage,
-                TokenUsagePurpose::SummaryFinal,
-            );
-        }
         let raw_markdown = final_output.summary;
 
         let english_markdown = clean_llm_markdown_output(&raw_markdown);
@@ -671,18 +662,14 @@ async fn run_markdown_transform(
         app_data_dir,
         cancellation_token,
         None,
+        Some(crate::summary::llm_client::TokenUsageContext {
+            pool: pool.clone(),
+            meeting_id: Some(meeting_id.to_string()),
+            purpose,
+        }),
     )
     .await
     .map_err(|e| format!("{failure_label} failed: {e}"))?;
-
-    if let Some(usage) = output.usage {
-        record_token_usage(
-            pool.clone(),
-            Some(meeting_id.to_string()),
-            usage,
-            purpose,
-        );
-    }
 
     Ok(clean_llm_markdown_output(&output.summary))
 }

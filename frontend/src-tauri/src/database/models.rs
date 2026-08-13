@@ -11,6 +11,8 @@ pub struct MeetingModel {
     pub folder_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meeting_folder_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
@@ -29,6 +31,8 @@ pub struct FolderModel {
     pub name: String,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 // Renamed from TranscriptSegment to Transcript to match the table name

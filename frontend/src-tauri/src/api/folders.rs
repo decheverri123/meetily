@@ -196,7 +196,7 @@ pub async fn api_recommend_icon<R: Runtime>(
     let app_data_dir = app.path().app_data_dir().ok();
     let client = Client::new();
 
-    let (raw, usage) = match generate_summary(
+    let raw = match generate_summary(
         &client,
         &invocation.provider,
         &invocation.model_name,
@@ -211,20 +211,16 @@ pub async fn api_recommend_icon<R: Runtime>(
         app_data_dir.as_ref(),
         None,
         None,
+        Some(crate::summary::llm_client::TokenUsageContext {
+            pool: pool.clone(),
+            meeting_id: None,
+            purpose: TokenUsagePurpose::RecommendIcon,
+        }),
     )
     .await {
-        Ok(res) => (res.summary, res.usage),
+        Ok(res) => res.summary,
         Err(_) => return Ok("default".to_string()),
     };
-
-    if let Some(usage) = usage {
-        record_token_usage(
-            pool.clone(),
-            None,
-            usage,
-            TokenUsagePurpose::RecommendIcon,
-        );
-    }
 
     Ok(parse_recommend_icon_response(&raw).unwrap_or_else(|_| "default".to_string()))
 }
@@ -307,6 +303,11 @@ async fn categorize_one(
         app_data_dir,
         None,
         None,
+        Some(crate::summary::llm_client::TokenUsageContext {
+            pool: pool.clone(),
+            meeting_id: Some(meeting_id.to_string()),
+            purpose: TokenUsagePurpose::Other, // Or a specific purpose like CategorizeMeeting
+        }),
     )
     .await?
     .summary;
@@ -430,6 +431,34 @@ pub async fn api_assign_meeting_to_folder<R: Runtime>(
     FoldersRepository::assign_meeting(pool, &meeting_id, folder_id.as_deref())
         .await
         .map_err(|e| format!("Failed to assign meeting: {}", e))
+}
+
+#[tauri::command]
+pub async fn api_update_folder_icon<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    icon: String,
+) -> Result<bool, String> {
+    log_info!("api_update_folder_icon called: id='{}', icon='{}'", id, icon);
+    let pool = state.db_manager.pool();
+    FoldersRepository::update_folder_icon(pool, &id, &icon)
+        .await
+        .map_err(|e| format!("Failed to update folder icon: {}", e))
+}
+
+#[tauri::command]
+pub async fn api_update_meeting_icon<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    icon: String,
+) -> Result<bool, String> {
+    log_info!("api_update_meeting_icon called: id='{}', icon='{}'", id, icon);
+    let pool = state.db_manager.pool();
+    crate::database::repositories::meeting::MeetingsRepository::update_meeting_icon(pool, &id, &icon)
+        .await
+        .map_err(|e| format!("Failed to update meeting icon: {}", e))
 }
 
 #[tauri::command]

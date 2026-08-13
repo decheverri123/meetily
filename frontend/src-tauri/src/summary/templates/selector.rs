@@ -94,20 +94,15 @@ pub async fn select_template(
         ctx.app_data_dir,
         ctx.cancellation_token,
         None,
+        Some(crate::summary::llm_client::TokenUsageContext {
+            pool: pool.clone(),
+            meeting_id: ctx.meeting_id.map(str::to_string),
+            purpose: TokenUsagePurpose::TemplateSelect,
+        }),
     )
     .await
     {
-        Ok(output) => {
-            if let Some(usage) = output.usage {
-                record_token_usage(
-                    pool.clone(),
-                    ctx.meeting_id.map(str::to_string),
-                    usage,
-                    TokenUsagePurpose::TemplateSelect,
-                );
-            }
-            output.summary
-        }
+        Ok(output) => output.summary,
         Err(e) => {
             warn!(
                 "select_template: LLM call failed, falling back to '{}': {}",

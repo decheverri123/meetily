@@ -63,11 +63,29 @@ function renderLucideIcon(iconKey: string | undefined, defaultIcon: React.Compon
   return <IconComponent className={className} />;
 }
 
-export function DynamicIcon({ name, isFolder, className }: { name: string; isFolder: boolean; className: string }) {
+export function DynamicIcon({ 
+  id, 
+  name, 
+  existingIcon, 
+  isFolder, 
+  className 
+}: { 
+  id?: string;
+  name: string; 
+  existingIcon?: string;
+  isFolder: boolean; 
+  className: string;
+}) {
   const cacheKey = `${isFolder ? 'f' : 'm'}:${name}`;
-  const [iconName, setIconName] = useState<string | undefined>(iconCache.get(cacheKey));
+  const [iconName, setIconName] = useState<string | undefined>(existingIcon || iconCache.get(cacheKey));
 
   useEffect(() => {
+    // If we already have an icon (from DB or cache), use it and stop.
+    if (existingIcon) {
+      setIconName(existingIcon);
+      return;
+    }
+    
     if (iconCache.has(cacheKey)) {
       setIconName(iconCache.get(cacheKey));
       return;
@@ -79,6 +97,15 @@ export function DynamicIcon({ name, isFolder, className }: { name: string; isFol
         if (res && res !== 'default') {
           iconCache.set(cacheKey, res);
           if (isMounted) setIconName(res);
+          
+          // Save to database if we have an ID
+          if (id) {
+            if (isFolder) {
+              invoke('api_update_folder_icon', { id, icon: res }).catch(console.error);
+            } else {
+              invoke('api_update_meeting_icon', { id, icon: res }).catch(console.error);
+            }
+          }
         }
       })
       .catch(() => {});
@@ -86,16 +113,16 @@ export function DynamicIcon({ name, isFolder, className }: { name: string; isFol
     return () => {
       isMounted = false;
     };
-  }, [name, isFolder, cacheKey]);
+  }, [id, name, existingIcon, isFolder, cacheKey]);
 
   const defaultComponent = isFolder ? Folder : FileText;
   return renderLucideIcon(iconName, defaultComponent, className);
 }
 
-export function getFolderIcon(folderName: string, className = "w-4 h-4 mr-2 text-muted-foreground"): React.ReactNode {
-  return <DynamicIcon name={folderName} isFolder={true} className={className} />;
+export function getFolderIcon(folderName: string, className = "w-4 h-4 mr-2 text-muted-foreground", id?: string, existingIcon?: string): React.ReactNode {
+  return <DynamicIcon id={id} name={folderName} existingIcon={existingIcon} isFolder={true} className={className} />;
 }
 
-export function getMeetingIcon(meetingTitle: string, className = "w-3.5 h-3.5 text-muted-foreground"): React.ReactNode {
-  return <DynamicIcon name={meetingTitle} isFolder={false} className={className} />;
+export function getMeetingIcon(meetingTitle: string, className = "w-3.5 h-3.5 text-muted-foreground", id?: string, existingIcon?: string): React.ReactNode {
+  return <DynamicIcon id={id} name={meetingTitle} existingIcon={existingIcon} isFolder={false} className={className} />;
 }

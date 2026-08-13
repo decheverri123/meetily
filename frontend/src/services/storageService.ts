@@ -21,12 +21,14 @@ export interface SaveMeetingResponse {
 export interface Meeting {
   id: string;
   title: string;
+  icon?: string;
   [key: string]: any; // Allow additional properties from backend
 }
 
 export interface Folder {
   id: string;
   name: string;
+  icon?: string;
   created_at: string;
   updated_at: string;
 }
@@ -34,6 +36,7 @@ export interface Folder {
 export interface MeetingWithFolder {
   id: string;
   title: string;
+  icon?: string;
   folder_id: string | null;
   folder_name: string | null;
 }
@@ -108,6 +111,14 @@ export class StorageService {
 
   async deleteFolder(id: string): Promise<boolean> {
     return invoke<boolean>('api_delete_folder', { id });
+  }
+
+  async updateFolderIcon(id: string, icon: string): Promise<boolean> {
+    return invoke<boolean>('api_update_folder_icon', { id, icon });
+  }
+
+  async updateMeetingIcon(id: string, icon: string): Promise<boolean> {
+    return invoke<boolean>('api_update_meeting_icon', { id, icon });
   }
 
   async assignMeetingToFolder(

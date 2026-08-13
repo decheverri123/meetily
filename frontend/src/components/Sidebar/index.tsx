@@ -764,7 +764,7 @@ const Sidebar: React.FC = () => {
               {depth === 0 ? (
                 <NotebookPen className="w-4 h-4 mr-2 text-muted-foreground" />
               ) : isUserFolder ? (
-                getFolderIcon(item.title)
+                getFolderIcon(item.title, "w-4 h-4 mr-2 text-muted-foreground", item.folderId, item.icon)
               ) : (
                 <Calendar className="w-4 h-4 mr-2 text-muted-foreground" />
               )}
@@ -802,7 +802,7 @@ const Sidebar: React.FC = () => {
               <div className="flex items-center w-full">
                 {isMeetingItem ? (
                   <div className="flex-shrink-0 flex items-center justify-center w-6 h-6 rounded-full mr-2 bg-secondary/10">
-                    {getMeetingIcon(item.title)}
+                    {getMeetingIcon(item.title, "w-3.5 h-3.5 text-muted-foreground", item.meetingId, item.icon)}
                   </div>
                 ) : (
                   <div className="flex-shrink-0 flex items-center justify-center w-6 h-6 rounded-full mr-2 bg-primary/15">
