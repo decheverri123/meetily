@@ -490,6 +490,12 @@ const Sidebar: React.FC = () => {
     }
     try {
       await renameFolder(renameFolderModal.folderId, name);
+      // Update the ask panel header if it's showing this folder.
+      setFolderAskTarget(prev =>
+        prev?.folderId === renameFolderModal.folderId
+          ? { ...prev, folderName: name }
+          : prev
+      );
       setRenameFolderModal(null);
       toast.success('Folder renamed');
     } catch (err) {
@@ -1221,6 +1227,10 @@ const Sidebar: React.FC = () => {
               if (!window.confirm(`Delete folder "${name}"? Meetings in it will become unfiled.`)) return;
               try {
                 await deleteFolder(id);
+                // Clear the ask panel if it's showing this folder.
+                setFolderAskTarget(prev =>
+                  prev?.folderId === id ? null : prev
+                );
                 toast.success(`Deleted folder "${name}"`);
               } catch (err) {
                 toast.error('Failed to delete folder', {

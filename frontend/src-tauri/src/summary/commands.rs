@@ -4,6 +4,7 @@ use crate::audio::recording_commands::{
     LiveLlmProviderInvocation,
 };
 use crate::database::repositories::{
+    folders::FoldersRepository,
     meeting::MeetingsRepository,
     summary::SummaryProcessesRepository, transcript_chunk::TranscriptChunksRepository,
 };
@@ -1479,6 +1480,11 @@ pub async fn ask_across_meetings<R: Runtime>(
 /// Reuses the same context-budgeting, relevance-ranking, and prompt-building
 /// logic as `ask_across_meetings`, but filters meetings to only those in the
 /// specified folder.
+///
+/// NOTE: Meeting titles and summaries are passed through to the LLM context
+/// without sanitization. This is consistent with `ask_across_meetings` and is
+/// an accepted trade-off for this local-first desktop app where the user
+/// controls all content.
 #[tauri::command]
 pub async fn ask_about_folder<R: Runtime>(
     app: AppHandle<R>,
@@ -1486,34 +1492,53 @@ pub async fn ask_about_folder<R: Runtime>(
     folder_id: String,
     question: String,
 ) -> Result<String, String> {
-    use crate::database::repositories::folders::FoldersRepository;
-
     log_info!("ask_about_folder called for folder_id: {}", folder_id);
 
     let question = validate_ask_question(&question)?;
+    // Basic UUID format validation (36 chars with 4 hyphens, hex digits
+    // elsewhere). Catches obviously malformed IDs before any DB lookup.
+    if folder_id.len() != 36
+        || folder_id.chars().filter(|c| *c == '-').count() != 4
+        || !folder_id
+            .chars()
+            .filter(|c| *c != '-')
+            .all(|c| c.is_ascii_hexdigit())
+    {
+        return Err("Invalid folder ID format.".to_string());
+    }
+
     let pool = state.db_manager.pool();
 
     // Verify the folder exists
     let folder = FoldersRepository::get_folder(pool, &folder_id)
         .await
-        .map_err(|e| format!("Failed to load folder: {}", e))?
+        .map_err(|e| {
+            log_error!("ask_about_folder: failed to load folder: {}", e);
+            "Failed to load folder.".to_string()
+        })?
         .ok_or_else(|| "Folder not found.".to_string())?;
 
     // Get meeting IDs in this folder
     let meeting_ids = FoldersRepository::get_meeting_ids_in_folder(pool, &folder_id)
         .await
-        .map_err(|e| format!("Failed to list meetings in folder: {}", e))?;
+        .map_err(|e| {
+            log_error!("ask_about_folder: failed to list meetings in folder: {}", e);
+            "Failed to list meetings in folder.".to_string()
+        })?;
 
     if meeting_ids.is_empty() {
         log_info!("ask_about_folder: no meetings in folder '{}'", folder.name);
         return Ok(format!("No meetings in folder '{}' yet.", folder.name));
     }
 
-    // Load meetings in this folder via a single targeted query (not N+1,
-    // not a full table scan).
+    // Load meetings in this folder via a targeted, chunked query (not N+1,
+    // not a full table scan; safe for folders with >999 meetings).
     let meetings = MeetingsRepository::get_meetings_by_ids(pool, &meeting_ids)
         .await
-        .map_err(|e| format!("Failed to load meetings: {}", e))?;
+        .map_err(|e| {
+            log_error!("ask_about_folder: failed to load meetings: {}", e);
+            "Failed to load meetings.".to_string()
+        })?;
 
     if meetings.is_empty() {
         return Ok(format!("No meetings found in folder '{}'.", folder.name));
@@ -1525,7 +1550,7 @@ pub async fn ask_about_folder<R: Runtime>(
             .await
             .map_err(|e| {
                 log_error!("ask_about_folder: failed to batch-load summaries: {}", e);
-                format!("Failed to load meeting summaries: {}", e)
+                "Failed to load meeting summaries.".to_string()
             })?;
 
     let meeting_summaries: Vec<(String, String, Option<String>)> = meetings

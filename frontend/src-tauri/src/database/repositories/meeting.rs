@@ -22,16 +22,24 @@ impl MeetingsRepository {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
-        let query = format!(
-            "SELECT * FROM meetings WHERE id IN ({}) ORDER BY created_at DESC",
-            placeholders.join(",")
-        );
-        let mut q = sqlx::query_as::<_, MeetingModel>(&query);
-        for id in ids {
-            q = q.bind(id);
+        // SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999. Chunk the IN
+        // clause to stay under that limit for folders with >999 meetings.
+        const BATCH_SIZE: usize = 999;
+        let mut all_meetings = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(BATCH_SIZE) {
+            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            let query = format!(
+                "SELECT * FROM meetings WHERE id IN ({}) ORDER BY created_at DESC",
+                placeholders.join(",")
+            );
+            let mut q = sqlx::query_as::<_, MeetingModel>(&query);
+            for id in chunk {
+                q = q.bind(id);
+            }
+            let mut batch = q.fetch_all(pool).await?;
+            all_meetings.append(&mut batch);
         }
-        q.fetch_all(pool).await
+        Ok(all_meetings)
     }
 
     pub async fn delete_meeting(pool: &SqlitePool, meeting_id: &str) -> Result<bool, SqlxError> {
@@ -491,5 +499,44 @@ mod tests {
             .expect("query failed");
 
         assert_eq!(result, "");
+    }
+
+    // ---- get_meetings_by_ids ----
+
+    #[tokio::test]
+    async fn get_meetings_by_ids_returns_only_requested() {
+        let pool = setup_pool().await;
+        insert_meeting(&pool, "m1").await;
+        insert_meeting(&pool, "m2").await;
+        insert_meeting(&pool, "m3").await;
+
+        let meetings =
+            MeetingsRepository::get_meetings_by_ids(&pool, &["m1".into(), "m3".into()])
+                .await
+                .unwrap();
+        let ids: Vec<&str> = meetings.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(meetings.len(), 2);
+        assert!(ids.contains(&"m1"));
+        assert!(ids.contains(&"m3"));
+        assert!(!ids.contains(&"m2"));
+    }
+
+    #[tokio::test]
+    async fn get_meetings_by_ids_empty_input_returns_empty() {
+        let pool = setup_pool().await;
+        insert_meeting(&pool, "m1").await;
+        let meetings = MeetingsRepository::get_meetings_by_ids(&pool, &[]).await.unwrap();
+        assert!(meetings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_meetings_by_ids_handles_large_input_via_chunking() {
+        // Exercises the SQLite 999-variable chunking path: 1001 IDs should
+        // produce results across multiple batched queries without error.
+        let pool = setup_pool().await;
+        let ids: Vec<String> = (0..1001).map(|i| format!("ghost-{i}")).collect();
+        // None of these rows exist; query should return empty without error.
+        let meetings = MeetingsRepository::get_meetings_by_ids(&pool, &ids).await.unwrap();
+        assert!(meetings.is_empty());
     }
 }
