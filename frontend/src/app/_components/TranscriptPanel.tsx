@@ -131,10 +131,9 @@ export function TranscriptPanel({
         </div>
       )}
 
-      {/* Transcript content */}
       <div className="pb-20">
         <div className="flex justify-center">
-          <div className="w-2/3 max-w-[750px]">
+          <div className="max-w-3xl mx-auto">
             <VirtualizedTranscriptView
               segments={segments}
               isRecording={isRecording}

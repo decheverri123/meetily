@@ -7,7 +7,7 @@ import type { TranscriptSegmentData } from '@/types';
 /**
  * The live transcript in the shape VirtualizedTranscriptView renders and
  * askCitations resolves citations against. Shared by TranscriptPanel and
- * LiveAskPanel so a cited segment id means the same thing on both sides.
+ * Scoped ask overlay so a cited segment id means the same thing on both sides.
  */
 export function useTranscriptSegments(): TranscriptSegmentData[] {
   const { transcripts } = useTranscripts();

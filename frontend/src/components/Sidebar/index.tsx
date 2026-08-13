@@ -6,7 +6,6 @@ import {
   ChevronRight,
   File,
   Settings,
-  ChevronLeftCircle,
   ChevronRightCircle,
   Calendar,
   StickyNote,
@@ -53,7 +52,6 @@ import { VisuallyHidden } from "@/components/ui/visually-hidden"
 
 import { MessageToast } from '../MessageToast';
 import Logo from '../Logo';
-import { GlobalAskPanel } from './GlobalAskPanel';
 import { FolderAskPanel } from './FolderAskPanel';
 import Info from '../Info';
 import { ComplianceNotification } from '../ComplianceNotification';
@@ -84,7 +82,6 @@ const Sidebar: React.FC = () => {
     aiCategorizeAllMeetings,
   } = useSidebar();
 
-  // Get recording state from RecordingStateContext (single source of truth)
   const { isRecording } = useRecordingState();
   const { openImportDialog } = useImportDialog();
   const { betaFeatures } = useConfig();
@@ -127,7 +124,6 @@ const Sidebar: React.FC = () => {
   });
   const [editingTitle, setEditingTitle] = useState<string>('');
 
-  // Ensure root 'Meeting Notes' folder is always expanded
   useEffect(() => {
     if (!expandedFolders.has(FOLDER_ROOT_ID)) {
       const newExpanded = new Set(expandedFolders);
@@ -136,13 +132,13 @@ const Sidebar: React.FC = () => {
     }
   }, [expandedFolders]);
 
-  // useEffect(() => {
-  //   if (settingsSaveSuccess !== null) {
-  //     const timer = setTimeout(() => {
-  //       setSettingsSaveSuccess(null);
-  //     }, 3000);
-  //   }
-  // }, [settingsSaveSuccess]);
+  useEffect(() => {
+    if (settingsSaveSuccess !== null) {
+      const timer = setTimeout(() => {
+        setSettingsSaveSuccess(null);
+      }, 3000);
+    }
+  }, [settingsSaveSuccess]);
 
 
   const [deleteModalState, setDeleteModalState] = useState<{ isOpen: boolean; itemId: string | null }>({ isOpen: false, itemId: null });
@@ -150,7 +146,6 @@ const Sidebar: React.FC = () => {
   useEffect(() => {
     // Note: Don't set hardcoded defaults - let DB be the source of truth
     const fetchModelConfig = async () => {
-      // Only make API call if serverAddress is loaded
       if (!serverAddress) {
         console.log('Waiting for server address to load before fetching model config');
         return;
@@ -184,7 +179,6 @@ const Sidebar: React.FC = () => {
   useEffect(() => {
     // Note: Don't set hardcoded defaults - let DB be the source of truth
     const fetchTranscriptSettings = async () => {
-      // Only make API call if serverAddress is loaded
       if (!serverAddress) {
         console.log('Waiting for server address to load before fetching transcript settings');
         return;
@@ -224,7 +218,6 @@ const Sidebar: React.FC = () => {
 
 
 
-  // Handle model config save
   const handleSaveModelConfig = async (config: ModelConfig) => {
     try {
       await invoke('api_save_model_config', {
@@ -279,7 +272,6 @@ const Sidebar: React.FC = () => {
     }
   };
 
-  // Handle search input changes
   const handleSearchChange = useCallback(async (value: string) => {
     setSearchQuery(value);
 
@@ -297,7 +289,6 @@ const Sidebar: React.FC = () => {
     }
   }, [expandedFolders, searchTranscripts]);
 
-  // Combine search results with sidebar items
   const filteredSidebarItems = useMemo(() => {
     if (!searchQuery.trim()) return sidebarItems;
 
@@ -361,7 +352,6 @@ const Sidebar: React.FC = () => {
 
 
   const handleDelete = async (itemId: string) => {
-    console.log('Deleting item:', itemId);
     const payload = {
       meetingId: itemId
     };
@@ -403,7 +393,6 @@ const Sidebar: React.FC = () => {
     setDeleteModalState({ isOpen: false, itemId: null });
   };
 
-  // Handle modal editing of meeting names
   const handleEditStart = (meetingId: string, currentTitle: string) => {
     setEditModalState({
       isOpen: true,
@@ -540,7 +529,7 @@ const Sidebar: React.FC = () => {
   }, [router]);
 
   const collapsedNavTileClass = (active: boolean) =>
-    `flex h-10 w-10 items-center justify-center rounded-xl border transition-colors duration-150 ${active
+    `flex h-11 w-11 items-center justify-center rounded-xl border transition-colors duration-150 ${active
       ? 'border-border/10 bg-secondary/[.09] text-foreground'
       : 'border-transparent text-muted-foreground hover:bg-secondary/5 hover:text-foreground'
     }`;
@@ -557,21 +546,7 @@ const Sidebar: React.FC = () => {
 
     return (
       <TooltipProvider>
-        <div className="flex h-full flex-col items-center gap-[26px] px-2 pb-5 pt-5">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={toggleCollapse}
-                className="flex h-[34px] w-[34px] items-center justify-center rounded-lg border border-border/10 bg-gradient-to-br from-white/10 to-white/0 text-foreground transition-opacity hover:opacity-80"
-              >
-                <ChevronRightCircle className="w-5 h-5" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              <p>Expand sidebar</p>
-            </TooltipContent>
-          </Tooltip>
-
+        <div className="flex h-full w-full flex-col items-center gap-1 px-2 pb-3 pt-4">
           <Tooltip>
             <TooltipTrigger asChild>
               <button
@@ -593,6 +568,8 @@ const Sidebar: React.FC = () => {
               <p>{isRecording ? "Recording in progress..." : "Start Recording"}</p>
             </TooltipContent>
           </Tooltip>
+
+          <div className="my-2 h-px w-8 bg-border/10" />
 
           <Tooltip>
             <TooltipTrigger asChild>
@@ -661,8 +638,7 @@ const Sidebar: React.FC = () => {
             <TooltipTrigger asChild>
               <button
                 onClick={() => router.push('/settings')}
-                className={`flex h-10 w-10 items-center justify-center rounded-xl transition-colors duration-150 ${isSettingsPage ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
-                  }`}
+                className={collapsedNavTileClass(isSettingsPage)}
               >
                 <Settings className="w-5 h-5" />
               </button>
@@ -672,13 +648,28 @@ const Sidebar: React.FC = () => {
             </TooltipContent>
           </Tooltip>
 
+          <div className="my-2 h-px w-8 bg-border/10" />
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={toggleCollapse}
+                className="flex h-11 w-11 items-center justify-center rounded-xl border border-transparent text-muted-foreground transition-colors hover:bg-secondary/5 hover:text-foreground"
+              >
+                <ChevronRightCircle className="w-5 h-5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              <p>Expand sidebar</p>
+            </TooltipContent>
+          </Tooltip>
+
           <Info isCollapsed={isCollapsed} />
         </div>
       </TooltipProvider>
     );
   };
 
-  // Find matching transcript snippet for a meeting item
   const findMatchingSnippet = (itemId: string) => {
     if (!searchQuery.trim() || !searchResults.length) return null;
     return searchResults.find(result => result.id === itemId);
@@ -692,7 +683,6 @@ const Sidebar: React.FC = () => {
     const isUserFolder = item.type === 'folder' && !!item.folderId && item.id !== 'unfiled';
     const isDropTarget = isUserFolder && dropTargetFolderId === item.folderId;
 
-    // Check if this item has a matching transcript snippet
     const matchingResult = isMeetingItem && item.meetingId ? findMatchingSnippet(item.meetingId) : null;
     const hasTranscriptMatch = !!matchingResult;
 
@@ -873,7 +863,6 @@ const Sidebar: React.FC = () => {
                 )}
               </div>
 
-              {/* Show transcript match snippet if available */}
               {hasTranscriptMatch && (
                 <div className="mt-1 ml-8 text-xs text-muted-foreground bg-accent-violet/10 p-1.5 rounded-md border border-accent-violet/20 line-clamp-2">
                   <span className="font-medium text-accent-violet">Match:</span> {matchingResult.matchContext}
@@ -893,22 +882,12 @@ const Sidebar: React.FC = () => {
 
   return (
     <div className="fixed left-3 top-3 bottom-3 z-40">
-      {!isCollapsed && (
-        <button
-          onClick={toggleCollapse}
-          className="glass-pill absolute -right-3 top-20 z-50 p-1.5 text-foreground hover:bg-secondary/20 transition-colors shadow-lg"
-          style={{ transform: 'translateX(50%)' }}
-        >
-          <ChevronLeftCircle className="w-6 h-6" />
-        </button>
-      )}
-
       <div
         className={`glass-rail h-full flex flex-col transition-all duration-300 ${isCollapsed ? 'w-20' : 'w-64'
           }`}
       >
-        {/*  Header with traffic light spacing */}
-        <div className={`flex-shrink-0 flex items-center ${isCollapsed ? '' : 'h-22'}`}>
+        {/* Header with traffic light spacing */}
+        <div className={`flex-shrink-0 flex items-center ${isCollapsed ? '' : 'h-24'}`}>
 
           {/* Title container */}
 
@@ -936,8 +915,6 @@ const Sidebar: React.FC = () => {
                     }
                   </InputGroup>
                 </div>
-
-                <GlobalAskPanel />
               </div>
             )}
           </div>
@@ -945,7 +922,6 @@ const Sidebar: React.FC = () => {
 
         {/* Main content - scrollable area */}
         <div className="flex-1 flex flex-col min-h-0">
-          {/* Fixed navigation items */}
           <div className="flex-shrink-0">
             {!isCollapsed && (
               <div
@@ -961,9 +937,7 @@ const Sidebar: React.FC = () => {
           {/* Content area */}
           <div className="flex-1 flex flex-col min-h-0">
             {renderCollapsedIcons()}
-            {/* Folder tree header with create button */}
-            {!isCollapsed && (
-              <div className="flex-shrink-0 flex items-center mx-3 mt-3 px-1">
+            <div className="flex-shrink-0 flex items-center mx-3 mt-3 px-1">
                 <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                   Folders
                 </span>
@@ -989,9 +963,8 @@ const Sidebar: React.FC = () => {
                   </TooltipProvider>
                 </div>
               </div>
-            )}
 
-            {/* Scrollable tree */}
+
             {!isCollapsed && (
               <div
                 className="flex-1 overflow-y-auto custom-scrollbar min-h-0"
@@ -1009,7 +982,6 @@ const Sidebar: React.FC = () => {
           </div>
         </div>
 
-        {/* Folder Ask Panel */}
         {folderAskTarget && !isCollapsed && (
           <div className="flex-shrink-0 border-t border-border/10 px-4 py-3">
             <FolderAskPanel
@@ -1025,7 +997,6 @@ const Sidebar: React.FC = () => {
           </div>
         )}
 
-        {/* Footer */}
         {!isCollapsed && (
 
           <div className="flex-shrink-0 p-3 border-t border-border/10">
@@ -1091,7 +1062,6 @@ const Sidebar: React.FC = () => {
         onCancel={() => setDeleteModalState({ isOpen: false, itemId: null })}
       />
 
-      {/* Edit Meeting Title Modal */}
       <Dialog open={editModalState.isOpen} onOpenChange={(open) => {
         if (!open) handleEditCancel();
       }}>
@@ -1142,7 +1112,6 @@ const Sidebar: React.FC = () => {
         </DialogContent>
       </Dialog>
 
-      {/* Folder context menu */}
       {folderContextMenu && (
         <div
           className="fixed z-50 min-w-[180px] rounded-lg border border-border/20 bg-background/95 text-popover-foreground backdrop-blur-md shadow-xl py-1 text-sm"
@@ -1246,7 +1215,6 @@ const Sidebar: React.FC = () => {
         </div>
       )}
 
-      {/* Create folder modal */}
       <Dialog open={createFolderModalOpen} onOpenChange={setCreateFolderModalOpen}>
         <DialogContent className="sm:max-w-[425px]">
           <VisuallyHidden>
@@ -1292,7 +1260,6 @@ const Sidebar: React.FC = () => {
         </DialogContent>
       </Dialog>
 
-      {/* Rename folder modal */}
       <Dialog
         open={renameFolderModal !== null}
         onOpenChange={(open) => {

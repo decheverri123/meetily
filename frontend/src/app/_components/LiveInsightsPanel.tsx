@@ -5,17 +5,6 @@ import { MarkdownContent } from '@/components/MarkdownContent';
 import { LiveProviderIndicator } from './LiveProviderIndicator';
 import type { UseLiveInsightsResult } from '@/hooks/useLiveInsights';
 
-/**
- * LiveInsightsPanel Component
- *
- * Shows a periodically refreshed running summary + action-items list generated
- * from the transcript-so-far while a meeting is actively being recorded.
- * Optional/opt-in second column alongside TranscriptPanel.
- *
- * Purely presentational: `useLiveInsights()` is called by the parent and kept
- * mounted for the life of the meeting, so its state (insights/growth
- * tracking/epoch) survives this panel being toggled off and back on.
- */
 export function LiveInsightsPanel({ insights, isLoading, error }: UseLiveInsightsResult) {
   const { isRecording } = useRecordingState();
   // No ad-hoc override for this panel (unlike the action chips) - it always
@@ -37,7 +26,7 @@ export function LiveInsightsPanel({ insights, isLoading, error }: UseLiveInsight
 
       <div className="pb-20 px-4 pt-4">
         <div className="flex justify-center">
-          <div className="w-full max-w-[750px]">
+          <div className="w-full max-w-3xl mx-auto">
             {error && (
               <div className="flex items-start gap-2 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2 mb-3">
                 <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />

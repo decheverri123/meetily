@@ -8,11 +8,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
-import { AskMeetingPanel } from '@/components/MeetingDetails/AskMeetingPanel';
+import { AiChatOverlay } from '@/components/shared/AiChatOverlay';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { useAskPanelShortcut } from '@/hooks/useAskPanelShortcut';
-import { CollapsedPanelRail } from '@/components/shared/CollapsedPanelRail';
-import { cn } from '@/lib/utils';
+import { useSuggestedQuestions } from '@/hooks/useSuggestedQuestions';
+import { useTranscriptSegments } from '@/hooks/useTranscriptSegments';
+import { modelConfigLabel } from '@/app/_components/LiveActionChipModelPicker';
 
 // Custom hooks
 import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
@@ -88,13 +89,11 @@ export default function PageContent({
   const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
   const templates = useTemplates(meeting.id);
 
-  // Callback to register the modal open function
   const handleRegisterModalOpen = (openFn: () => void) => {
     console.log('📝 Registering modal open function in PageContent');
     openModelSettingsRef.current = openFn;
   };
 
-  // Callback to trigger modal open (called from error handler)
   const handleOpenModelSettings = () => {
     console.log('🔔 Opening model settings from PageContent');
     if (openModelSettingsRef.current) {
@@ -104,7 +103,6 @@ export default function PageContent({
     }
   };
 
-  // Save model config to backend database and sync via event
   const handleSaveModelConfig = async (config?: ModelConfig) => {
     if (!config) return;
     try {
@@ -165,7 +163,27 @@ export default function PageContent({
 
   useAskPanelShortcut(useCallback(() => setShowAskPanel(open => !open), []));
 
-  // Track page view
+  const meetingSegments = useTranscriptSegments();
+  const meetingSuggestions = useSuggestedQuestions({
+    command: 'suggest_meeting_questions',
+    args: { meetingId: meeting.id },
+    scope: meeting.id,
+  });
+  const meetingAskBuildArgs = useCallback(
+    (question: string) => ({ meetingId: meeting.id, question }),
+    [meeting.id]
+  );
+  const askScoped = {
+    command: 'ask_about_meeting',
+    buildArgs: meetingAskBuildArgs,
+    segments: meetingSegments,
+    suggestions: meetingSuggestions,
+    placeholder: 'Ask a question about this meeting...',
+    modelLabel: modelConfigLabel(modelConfig),
+    onCitedSegmentsChange: setCitedSegmentIds,
+    onFocusSegment: (id: string) => setFocusSegment({ id }),
+  };
+
   useEffect(() => {
     Analytics.trackPageView('meeting_details');
   }, []);
@@ -186,7 +204,6 @@ export default function PageContent({
     templates.applyResolvedTemplate,
   ]);
 
-  // Auto-generate summary when flag is set
   useEffect(() => {
     let cancelled = false;
 
@@ -217,7 +234,6 @@ export default function PageContent({
       transition={{ duration: 0.3, ease: 'easeOut' }}
       className="relative flex flex-col h-screen bg-background text-foreground overflow-hidden"
     >
-      {/* Ambient background glow - purely decorative, sits behind all content */}
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="animate-drift absolute -top-1/4 left-1/3 h-[60vh] w-[60vh] rounded-full bg-primary/10 blur-[120px]" />
         <div className="animate-drift absolute bottom-0 right-0 h-[50vh] w-[50vh] rounded-full bg-accent-violet/10 blur-[120px]" style={{ animationDelay: '6s' }} />
@@ -285,38 +301,7 @@ export default function PageContent({
           onOpenModelSettings={handleRegisterModalOpen}
           onDeleteMeeting={async () => setIsDeleteModalOpen(true)}
         />
-        {/* Mirrors TranscriptPanel's own collapse animation: stays mounted at
-            its full width while the outer clip narrows to a rail, so the
-            panel slides shut rather than reflowing, and its state (open
-            thread, scroll position) survives the round trip. */}
-        <div
-          className={cn(
-            'relative shrink-0 overflow-hidden transition-[width] duration-300 ease-out motion-reduce:transition-none',
-            showAskPanel ? 'w-[400px]' : 'w-11'
-          )}
-        >
-          <div
-            className={cn(
-              'flex h-full w-[400px] shrink-0 transition-opacity duration-200 motion-reduce:transition-none',
-              showAskPanel ? 'opacity-100 delay-100' : 'pointer-events-none opacity-0'
-            )}
-          >
-            <AskMeetingPanel
-              meetingId={meeting.id}
-              segments={segments}
-              onCitedSegmentsChange={setCitedSegmentIds}
-              onFocusSegment={id => setFocusSegment({ id })}
-              onClose={() => setShowAskPanel(false)}
-            />
-          </div>
-
-          <CollapsedPanelRail
-            label="Ask"
-            visible={!showAskPanel}
-            onExpand={() => setShowAskPanel(true)}
-            expandTitle="Ask this meeting (⌘J)"
-          />
-        </div>
+        <AiChatOverlay open={showAskPanel} onOpenChange={setShowAskPanel} scoped={askScoped} />
       </div>
 
       <ConfirmationModal

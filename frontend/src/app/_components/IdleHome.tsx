@@ -4,9 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Mic, Search, SlidersHorizontal, Upload } from 'lucide-react';
 import { toast } from 'sonner';
+import { cn } from '@/lib/utils';
 import { PermissionWarning } from '@/components/PermissionWarning';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useImportDialog } from '@/contexts/ImportDialogContext';
+import { AiChatOverlay } from '@/components/shared/AiChatOverlay';
+import { useAskPanelShortcut } from '@/hooks/useAskPanelShortcut';
 import { ModalType } from '@/hooks/useModalState';
 
 const SEARCH_DEBOUNCE_MS = 250;
@@ -65,6 +68,39 @@ function MeetingCard({ id, title, preview, onOpen }: MeetingCardProps) {
   );
 }
 
+function FolderChip({
+  label,
+  active,
+  badge,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  badge?: 'auto';
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-[12.5px] transition-colors',
+        active
+          ? 'border-primary/40 bg-primary/15 text-foreground'
+          : 'border-border/10 bg-secondary/5 text-muted-foreground hover:bg-secondary/10 hover:text-foreground'
+      )}
+    >
+      {label}
+      {badge === 'auto' && (
+        <span className="rounded-full bg-accent-violet/20 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-accent-violet">
+          auto
+        </span>
+      )}
+    </button>
+  );
+}
+
 interface IdleHomeProps {
   onStartRecording: () => Promise<void>;
   showModal: (name: ModalType, message?: string) => void;
@@ -88,11 +124,18 @@ export function IdleHome({
   onRecheckPermissions,
 }: IdleHomeProps) {
   const router = useRouter();
-  const { meetings, setCurrentMeeting, searchTranscripts, searchResults } = useSidebar();
+  const { meetings, folders, setCurrentMeeting, searchTranscripts, searchResults } = useSidebar();
   const { openImportDialog } = useImportDialog();
 
   const [query, setQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // null = "All". Otherwise narrows the meeting grid to a folder (auto or user-created).
+  const [folderFilter, setFolderFilter] = useState<string | null>(null);
+
+  // FAB-driven AI chat; Cmd/Ctrl+J toggles same as other screens.
+  const [showAskPanel, setShowAskPanel] = useState(false);
+  useAskPanelShortcut(useCallback(() => setShowAskPanel(open => !open), []));
 
   // usePermissionCheck reports "no devices" until its first probe resolves, so
   // wait for that before claiming anything is missing. Sticky, so a manual
@@ -152,13 +195,20 @@ export function IdleHome({
 
   const visibleMeetings = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return meetings;
-    return meetings.filter(m => m.title.toLowerCase().includes(needle) || transcriptMatches.has(m.id));
-  }, [meetings, query, transcriptMatches]);
+    return meetings.filter(m => {
+      if (folderFilter === '__unassigned__') {
+        if (m.folder_id !== null) return false;
+      } else if (folderFilter !== null && m.folder_id !== folderFilter) {
+        return false;
+      }
+      if (!needle) return true;
+      return m.title.toLowerCase().includes(needle) || transcriptMatches.has(m.id);
+    });
+  }, [meetings, query, transcriptMatches, folderFilter]);
 
   return (
-    <div className="flex flex-1 flex-col gap-[22px] overflow-y-auto p-8">
-      <section className="glass-panel flex flex-none flex-col gap-4 rounded-3xl px-11 py-10">
+    <div className="flex flex-1 flex-col gap-6 overflow-y-auto p-8">
+      <section className="glass-panel flex flex-none flex-col gap-4 px-10 py-10">
         <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
           Ready · Nothing leaves this machine
         </p>
@@ -225,6 +275,29 @@ export function IdleHome({
           </div>
         </div>
 
+        {/* Folder filter chips. `null` = all, `__unassigned__` = meetings with no folder. */}
+        <div className="flex flex-wrap items-center gap-2">
+          <FolderChip
+            label="All"
+            active={folderFilter === null}
+            onClick={() => setFolderFilter(null)}
+          />
+          {folders.map(folder => (
+            <FolderChip
+              key={folder.id}
+              label={folder.name}
+              active={folderFilter === folder.id}
+              badge={folder.is_auto ? 'auto' : undefined}
+              onClick={() => setFolderFilter(folder.id)}
+            />
+          ))}
+          <FolderChip
+            label="Unassigned"
+            active={folderFilter === '__unassigned__'}
+            onClick={() => setFolderFilter('__unassigned__')}
+          />
+        </div>
+
         {visibleMeetings.length > 0 ? (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {visibleMeetings.map(meeting => (
@@ -248,6 +321,9 @@ export function IdleHome({
           </div>
         )}
       </section>
+
+      {/* Global AI chat - cross-meetings, no per-meeting context here. */}
+      <AiChatOverlay open={showAskPanel} onOpenChange={setShowAskPanel} />
     </div>
   );
 }

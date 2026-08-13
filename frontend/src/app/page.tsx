@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState, useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useState, useEffect, useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react';
 import { motion } from 'framer-motion';
 import { Sparkles } from 'lucide-react';
 import { RecordingControls } from '@/components/RecordingControls';
@@ -17,8 +17,13 @@ import Analytics from '@/lib/analytics';
 import { SettingsModals } from './_components/SettingsModal';
 import { TranscriptPanel } from './_components/TranscriptPanel';
 import { LiveInsightsPanel } from './_components/LiveInsightsPanel';
-import { LiveAskPanel } from './_components/LiveAskPanel';
-import { AskFloatingBubble } from './_components/AskFloatingBubble';
+import { useSuggestedQuestions } from '@/hooks/useSuggestedQuestions';
+import { useTranscriptSegments } from '@/hooks/useTranscriptSegments';
+import { buildTimestampedTranscript } from '@/lib/askCitations';
+import { modelConfigLabel } from './_components/LiveActionChipModelPicker';
+import { LiveActionChips } from './_components/LiveActionChips';
+import { LiveProviderIndicator } from './_components/LiveProviderIndicator';
+import { AiChatOverlay } from '@/components/shared/AiChatOverlay';
 import { useModalState } from '@/hooks/useModalState';
 import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
@@ -43,17 +48,13 @@ export default function Home() {
   // persisted: null means "use the Settings-configured provider/model", which
   // must stay the default (see useLiveActionChips's modelOverride param).
   const [liveActionChipOverride, setLiveActionChipOverride] = useState<LiveActionChipModelOverride | null>(null);
-  // Ask panel: a floating chat bubble, collapsed by default, toggled with
-  // Cmd/Ctrl+J or by clicking the bubble.
+  // Ask panel: a Notion-style FAB + overlay, toggled with Cmd/Ctrl+J.
   const [showAskPanel, setShowAskPanel] = useState(false);
-  // Flags the bubble while collapsed - cleared as soon as it's opened.
+  // Flags the FAB while collapsed - cleared as soon as it's opened.
   const [hasAskUnread, setHasAskUnread] = useState(false);
-  // Forwarded into AskFloatingBubble → LiveAskPanel → AskSidebar so the
-  // composer can be focused when the panel opens.
-  const askComposerRef = useRef<HTMLTextAreaElement>(null);
-  // Mirrors `showAskPanel` so the onAnswered/onSuggestionsReady callbacks
-  // always read the latest value without re-creating themselves on every
-  // open/close toggle (which would race the state update).
+  // Mirrors `showAskPanel` so the onAnswered callback always reads the latest
+  // value without re-creating itself on every open/close toggle (which would
+  // race the state update).
   const showAskPanelRef = useRef(showAskPanel);
   showAskPanelRef.current = showAskPanel;
   // Transcript segments the latest answer cited, and the one whose chip was
@@ -72,7 +73,7 @@ export default function Home() {
 
   // Use contexts for state management
   const { meetingTitle, transcripts } = useTranscripts();
-  const { transcriptModelConfig, selectedDevices } = useConfig();
+  const { modelConfig, transcriptModelConfig, selectedDevices } = useConfig();
   const recordingState = useRecordingState();
 
   // Extract status from global state
@@ -114,6 +115,23 @@ export default function Home() {
   // meeting regardless of any panel visibility.
   const liveActionChips = useLiveActionChips(liveActionChipOverride);
 
+  const segments = useTranscriptSegments();
+  const liveTranscriptText = useMemo(
+    () => buildTimestampedTranscript(transcripts),
+    [transcripts]
+  );
+  const liveSuggestions = useSuggestedQuestions({
+    command: 'suggest_live_transcript_questions',
+    args: { transcript: liveTranscriptText },
+    scope: 'live',
+    enabled: liveTranscriptText.length >= 400,
+    refreshKey: Math.floor(liveTranscriptText.length / 4000),
+  });
+  const liveAskBuildArgs = useCallback(
+    (question: string) => ({ transcript: liveTranscriptText, question }),
+    [liveTranscriptText]
+  );
+
   const toggleAskPanel = useCallback(() => {
     setShowAskPanel(open => {
       const next = !open;
@@ -122,7 +140,6 @@ export default function Home() {
     });
   }, []);
   useAskPanelShortcut(toggleAskPanel);
-  const dismissAskPanel = useCallback(() => setShowAskPanel(false), []);
 
   // Force-close the ask panel during PROCESSING_TRANSCRIPTS / SAVING. The FAB
   // also hides its launcher in those phases, but if the user opened it just
@@ -135,14 +152,34 @@ export default function Home() {
     }
   }, [isPostStopFinalizing, showAskPanel]);
 
-  // Shared by both LiveAskPanel triggers (a finished answer, a new suggestion
-  // batch) - either one flags the bubble while it's collapsed. Reads the
-  // current `showAskPanel` via a ref to avoid a stale closure during the
-  // open transition (the callback may fire on the same render where the
-  // panel hasn't yet flipped to open).
+  // Shared by the scoped chat overlay (a finished answer) so it can flag the
+  // FAB while collapsed. Reads the current `showAskPanel` via a ref to avoid
+  // a stale closure during the open transition (the callback may fire on the
+  // same render where the panel hasn't yet flipped to open).
   const flagAskUnread = useCallback(() => {
     setHasAskUnread(current => current || !showAskPanelRef.current);
   }, []);
+
+  const showActionChips = recordingState.isRecording || liveActionChips.hasActivity;
+  const liveAskScoped = {
+    command: 'ask_about_live_transcript',
+    buildArgs: liveAskBuildArgs,
+    segments,
+    suggestions: liveSuggestions,
+    placeholder: 'Ask about the meeting so far...',
+    modelLabel: modelConfigLabel(modelConfig),
+    disabled: liveTranscriptText.length === 0,
+    disabledHint: 'Waiting for the first words of the meeting...',
+    onAnswered: flagAskUnread,
+    onCitedSegmentsChange: setCitedSegmentIds,
+    onFocusSegment: (id: string) => setFocusSegment({ id }),
+    headerExtra: showActionChips ? (
+      <>
+        <LiveActionChips {...liveActionChips} />
+        <LiveProviderIndicator provider={liveActionChipOverride?.provider ?? modelConfig.provider} />
+      </>
+    ) : undefined,
+  };
 
   // Drag-to-resize the transcript/insights split. Listens on `window` rather
   // than the divider itself so the drag keeps tracking even if the pointer
@@ -400,28 +437,13 @@ export default function Home() {
               </div>
             </div>
 
-            <AskFloatingBubble
+            <AiChatOverlay
               open={showAskPanel}
+              onOpenChange={setShowAskPanel}
               hasUnread={hasAskUnread}
-              onOpen={toggleAskPanel}
-              onDismiss={dismissAskPanel}
-              composerRef={askComposerRef}
-              enabled={!isPostStopFinalizing}
-            >
-              <LiveAskPanel
-                fill={transcriptCollapsed}
-                onCitedSegmentsChange={setCitedSegmentIds}
-                onFocusSegment={id => setFocusSegment({ id })}
-                onClose={() => setShowAskPanel(false)}
-                onAnswered={flagAskUnread}
-                onSuggestionsReady={flagAskUnread}
-                liveActionChips={liveActionChips}
-                liveActionChipOverride={liveActionChipOverride}
-                onLiveActionChipOverrideChange={setLiveActionChipOverride}
-                isRecording={recordingState.isRecording}
-                composerRef={askComposerRef}
-              />
-            </AskFloatingBubble>
+              hidden={isPostStopFinalizing}
+              scoped={liveAskScoped}
+            />
           </>
         )}
 
