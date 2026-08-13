@@ -48,6 +48,14 @@ export default function Home() {
   const [showAskPanel, setShowAskPanel] = useState(false);
   // Flags the bubble while collapsed - cleared as soon as it's opened.
   const [hasAskUnread, setHasAskUnread] = useState(false);
+  // Forwarded into AskFloatingBubble → LiveAskPanel → AskSidebar so the
+  // composer can be focused when the panel opens.
+  const askComposerRef = useRef<HTMLTextAreaElement>(null);
+  // Mirrors `showAskPanel` so the onAnswered/onSuggestionsReady callbacks
+  // always read the latest value without re-creating themselves on every
+  // open/close toggle (which would race the state update).
+  const showAskPanelRef = useRef(showAskPanel);
+  showAskPanelRef.current = showAskPanel;
   // Transcript segments the latest answer cited, and the one whose chip was
   // last clicked. Held here because they are produced by the ask panel and
   // consumed by the transcript column, which are otherwise unrelated.
@@ -114,12 +122,27 @@ export default function Home() {
     });
   }, []);
   useAskPanelShortcut(toggleAskPanel);
+  const dismissAskPanel = useCallback(() => setShowAskPanel(false), []);
+
+  // Force-close the ask panel during PROCESSING_TRANSCRIPTS / SAVING. The FAB
+  // also hides its launcher in those phases, but if the user opened it just
+  // before stop completed, force-close keeps the panel from racing the save.
+  const isPostStopFinalizing =
+    status === RecordingStatus.PROCESSING_TRANSCRIPTS || status === RecordingStatus.SAVING;
+  useEffect(() => {
+    if (isPostStopFinalizing && showAskPanel) {
+      setShowAskPanel(false);
+    }
+  }, [isPostStopFinalizing, showAskPanel]);
 
   // Shared by both LiveAskPanel triggers (a finished answer, a new suggestion
-  // batch) - either one flags the bubble while it's collapsed.
+  // batch) - either one flags the bubble while it's collapsed. Reads the
+  // current `showAskPanel` via a ref to avoid a stale closure during the
+  // open transition (the callback may fire on the same render where the
+  // panel hasn't yet flipped to open).
   const flagAskUnread = useCallback(() => {
-    setHasAskUnread(current => current || !showAskPanel);
-  }, [showAskPanel]);
+    setHasAskUnread(current => current || !showAskPanelRef.current);
+  }, []);
 
   // Drag-to-resize the transcript/insights split. Listens on `window` rather
   // than the divider itself so the drag keeps tracking even if the pointer
@@ -377,8 +400,16 @@ export default function Home() {
               </div>
             </div>
 
-            <AskFloatingBubble open={showAskPanel} hasUnread={hasAskUnread} onOpen={toggleAskPanel}>
+            <AskFloatingBubble
+              open={showAskPanel}
+              hasUnread={hasAskUnread}
+              onOpen={toggleAskPanel}
+              onDismiss={dismissAskPanel}
+              composerRef={askComposerRef}
+              enabled={!isPostStopFinalizing}
+            >
               <LiveAskPanel
+                fill={transcriptCollapsed}
                 onCitedSegmentsChange={setCitedSegmentIds}
                 onFocusSegment={id => setFocusSegment({ id })}
                 onClose={() => setShowAskPanel(false)}
@@ -388,6 +419,7 @@ export default function Home() {
                 liveActionChipOverride={liveActionChipOverride}
                 onLiveActionChipOverrideChange={setLiveActionChipOverride}
                 isRecording={recordingState.isRecording}
+                composerRef={askComposerRef}
               />
             </AskFloatingBubble>
           </>

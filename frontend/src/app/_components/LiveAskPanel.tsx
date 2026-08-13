@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, type MutableRefObject } from 'react';
 import { AskSidebar } from '@/components/shared/AskSidebar';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useTranscriptSegments } from '@/hooks/useTranscriptSegments';
@@ -52,6 +52,8 @@ interface LiveAskPanelProps {
   liveActionChipOverride: LiveActionChipModelOverride | null;
   onLiveActionChipOverrideChange: (override: LiveActionChipModelOverride | null) => void;
   isRecording: boolean;
+  /** Forwarded by the parent so the bubble can auto-focus the composer on open. */
+  composerRef?: MutableRefObject<HTMLTextAreaElement | null>;
 }
 
 export function LiveAskPanel({
@@ -65,6 +67,7 @@ export function LiveAskPanel({
   liveActionChipOverride,
   onLiveActionChipOverrideChange,
   isRecording,
+  composerRef,
 }: LiveAskPanelProps) {
   const { transcripts } = useTranscripts();
   const segments = useTranscriptSegments();
@@ -133,6 +136,7 @@ export function LiveAskPanel({
       onFocusSegment={onFocusSegment}
       onClose={onClose}
       onAnswered={onAnswered}
+      composerRef={composerRef}
     />
   );
 }

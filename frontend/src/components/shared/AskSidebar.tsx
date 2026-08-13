@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ArrowUp, Check, Copy, Loader2, PanelRightClose, Sparkles } from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
+import { ArrowUp, Check, Copy, Loader2, MessageSquareText, PanelRightClose } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Textarea } from '@/components/ui/textarea';
@@ -76,6 +76,8 @@ export interface AskSidebarProps {
   onClose?: () => void;
   /** Fires each time an answer finishes, for a caller showing this collapsed to flag it. */
   onAnswered?: () => void;
+  /** Forwarded so a parent (e.g. the FAB) can focus the composer on open. */
+  composerRef?: MutableRefObject<HTMLTextAreaElement | null>;
 }
 
 export function AskSidebar({
@@ -93,9 +95,21 @@ export function AskSidebar({
   onFocusSegment,
   onClose,
   onAnswered,
+  composerRef,
 }: AskSidebarProps) {
   const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const internalTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Mirror the internal ref to the caller's ref whenever the textarea mounts,
+  // so a parent can focus the composer without giving up its own ref access.
+  useEffect(() => {
+    if (!composerRef) return;
+    composerRef.current = internalTextareaRef.current;
+  }, [composerRef]);
+
+  // Use the ref the layout-effect below mutates for height growth - the
+  // parent ref would miss mid-render ref churn. Both point at the same node.
+  const textareaRef = internalTextareaRef;
 
   const {
     question,
@@ -168,7 +182,7 @@ export function AskSidebar({
       )}
     >
       <div className="flex shrink-0 items-center gap-2.5 border-b border-border/10 px-5 py-4">
-        <Sparkles className="h-4 w-4 text-accent-violet" />
+        <MessageSquareText className="h-4 w-4 text-accent-violet" />
         <span className="text-sm font-semibold text-foreground">Ask this meeting</span>
         {onClose && (
           <button
