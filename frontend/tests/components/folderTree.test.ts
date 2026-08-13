@@ -11,8 +11,8 @@ import type {
 } from '../../src/services/storageService';
 
 const folders: Folder[] = [
-  { id: 'f1', name: 'Q4 Planning', created_at: '', updated_at: '' },
-  { id: 'f2', name: 'Customer Calls', created_at: '', updated_at: '' },
+  { id: 'f1', name: 'Q4 Planning', is_auto: false, created_at: '', updated_at: '' },
+  { id: 'f2', name: 'Customer Calls', is_auto: false, created_at: '', updated_at: '' },
 ];
 
 const meetings: MeetingWithFolder[] = [
@@ -33,8 +33,8 @@ describe('buildSidebarTree', () => {
 
   test('sorts folders case-insensitively by name', () => {
     const messy: Folder[] = [
-      { id: 'b', name: 'Bravo', created_at: '', updated_at: '' },
-      { id: 'a', name: 'alpha', created_at: '', updated_at: '' },
+      { id: 'b', name: 'Bravo', is_auto: false, created_at: '', updated_at: '' },
+      { id: 'a', name: 'alpha', is_auto: false, created_at: '', updated_at: '' },
     ];
     const tree = buildSidebarTree(messy, []);
     const childIds = tree[0].children!.map((c) => c.id);

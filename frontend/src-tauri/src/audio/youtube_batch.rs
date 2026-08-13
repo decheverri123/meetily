@@ -271,16 +271,18 @@ pub fn partition_valid_urls(
 
 pub fn parse_and_validate_batch_input(
     raw: &str,
-    titles: Option<Vec<String>>,
+    titles: Option<Vec<Option<String>>>,
 ) -> (Vec<(String, Option<String>)>, Vec<(String, String)>) {
     let urls = parse_batch_url_input(raw);
     let (mut valid, invalid) = partition_valid_urls(urls);
     if let Some(t) = titles {
-        for (i, title) in t.into_iter().enumerate() {
-            if let Some(slot) = valid.get_mut(i) {
-                let trimmed = title.trim();
-                if !trimmed.is_empty() {
-                    slot.1 = Some(trimmed.to_string());
+        for (i, title_opt) in t.into_iter().enumerate() {
+            if let Some(title) = title_opt {
+                if let Some(slot) = valid.get_mut(i) {
+                    let trimmed = title.trim();
+                    if !trimmed.is_empty() {
+                        slot.1 = Some(trimmed.to_string());
+                    }
                 }
             }
         }
@@ -292,7 +294,7 @@ pub fn parse_and_validate_batch_input(
 pub async fn start_youtube_batch_import_command<R: Runtime>(
     app: AppHandle<R>,
     urls: Vec<String>,
-    titles: Option<Vec<String>>,
+    titles: Option<Vec<Option<String>>>,
 ) -> Result<ImportStarted, String> {
     let joined = urls.join("\n");
     let (valid, invalid) = parse_and_validate_batch_input(&joined, titles);
@@ -587,7 +589,7 @@ mod tests {
     fn test_parse_and_validate_combined() {
         let (valid, invalid) = parse_and_validate_batch_input(
             "https://youtu.be/a\nnot_a_url\nhttps://youtu.be/b",
-            Some(vec!["Title A".to_string(), "Title B".to_string()]),
+            Some(vec![Some("Title A".to_string()), Some("Title B".to_string())]),
         );
         assert_eq!(valid.len(), 2);
         assert_eq!(valid[0].0, "https://youtu.be/a");
@@ -602,7 +604,7 @@ mod tests {
     fn test_parse_and_validate_drops_blank_titles() {
         let (valid, _) = parse_and_validate_batch_input(
             "https://youtu.be/a\nhttps://youtu.be/b",
-            Some(vec!["   ".to_string(), "Real".to_string()]),
+            Some(vec![Some("   ".to_string()), Some("Real".to_string())]),
         );
         assert!(valid[0].1.is_none());
         assert_eq!(valid[1].1.as_deref(), Some("Real"));
@@ -802,9 +804,9 @@ mod tests {
         let (valid, invalid) = parse_and_validate_batch_input(
             "https://youtu.be/a\nhttps://youtu.be/b",
             Some(vec![
-                "T1".to_string(),
-                "T2".to_string(),
-                "T3-extra".to_string(),
+                Some("T1".to_string()),
+                Some("T2".to_string()),
+                Some("T3-extra".to_string()),
             ]),
         );
         assert_eq!(valid.len(), 2);
@@ -818,7 +820,7 @@ mod tests {
         // Fewer titles than URLs: extra URLs have no title.
         let (valid, _invalid) = parse_and_validate_batch_input(
             "https://youtu.be/a\nhttps://youtu.be/b\nhttps://youtu.be/c",
-            Some(vec!["T1".to_string()]),
+            Some(vec![Some("T1".to_string())]),
         );
         assert_eq!(valid.len(), 3);
         assert_eq!(valid[0].1.as_deref(), Some("T1"));
@@ -832,7 +834,7 @@ mod tests {
         // So an invalid URL at position 0 shifts the title mapping.
         let (valid, _invalid) = parse_and_validate_batch_input(
             "garbage\nhttps://youtu.be/real",
-            Some(vec!["TitleForFirst".to_string(), "TitleForSecond".to_string()]),
+            Some(vec![Some("TitleForFirst".to_string()), Some("TitleForSecond".to_string())]),
         );
         assert_eq!(valid.len(), 1);
         // Title index 0 maps to the first valid slot — i.e. "TitleForFirst"
@@ -844,11 +846,22 @@ mod tests {
         // Whitespace-only titles are dropped, not stored as the whitespace.
         let (valid, _) = parse_and_validate_batch_input(
             "https://youtu.be/a\nhttps://youtu.be/b\nhttps://youtu.be/c",
-            Some(vec!["   ".to_string(), "\t\n".to_string(), "Real".to_string()]),
+            Some(vec![Some("   ".to_string()), Some("\t\n".to_string()), Some("Real".to_string())]),
         );
         assert!(valid[0].1.is_none());
         assert!(valid[1].1.is_none());
         assert_eq!(valid[2].1.as_deref(), Some("Real"));
+    }
+
+    #[test]
+    fn test_parse_and_validate_handles_none_titles_in_vector() {
+        // Null/None title elements in the array are handled cleanly.
+        let (valid, _) = parse_and_validate_batch_input(
+            "https://youtu.be/a\nhttps://youtu.be/b",
+            Some(vec![None, Some("Title B".to_string())]),
+        );
+        assert!(valid[0].1.is_none());
+        assert_eq!(valid[1].1.as_deref(), Some("Title B"));
     }
 
     #[test]

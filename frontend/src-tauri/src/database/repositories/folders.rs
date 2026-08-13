@@ -52,6 +52,21 @@ impl FoldersRepository {
     }
 
     pub async fn create_folder(pool: &SqlitePool, name: &str) -> Result<FolderModel, SqlxError> {
+        Self::create_folder_with_kind(pool, name, false).await
+    }
+
+    pub async fn create_auto_folder(
+        pool: &SqlitePool,
+        name: &str,
+    ) -> Result<FolderModel, SqlxError> {
+        Self::create_folder_with_kind(pool, name, true).await
+    }
+
+    async fn create_folder_with_kind(
+        pool: &SqlitePool,
+        name: &str,
+        is_auto: bool,
+    ) -> Result<FolderModel, SqlxError> {
         let trimmed = name.trim();
         if is_blank_name(trimmed) {
             return Err(SqlxError::Protocol("folder name cannot be empty".to_string()));
@@ -60,11 +75,12 @@ impl FoldersRepository {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().naive_utc();
 
-        sqlx::query("INSERT INTO folders (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+        sqlx::query("INSERT INTO folders (id, name, created_at, updated_at, is_auto) VALUES (?, ?, ?, ?, ?)")
             .bind(&id)
             .bind(trimmed)
             .bind(now)
             .bind(now)
+            .bind(is_auto)
             .execute(pool)
             .await?;
 
@@ -74,6 +90,7 @@ impl FoldersRepository {
             created_at: crate::database::models::DateTimeUtc::from(now),
             updated_at: crate::database::models::DateTimeUtc::from(now),
             icon: None,
+            is_auto,
         })
     }
 

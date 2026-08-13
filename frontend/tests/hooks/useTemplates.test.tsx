@@ -161,6 +161,7 @@ describe('useTemplates', () => {
     // does not change across the meetingId switch).
     act(() => {
       result.current.applyResolvedTemplate({
+        meeting_id: 'meeting-a',
         resolved_template_id: null,
         resolved_template_name: 'Meeting A Retro',
         is_generated_template: true,

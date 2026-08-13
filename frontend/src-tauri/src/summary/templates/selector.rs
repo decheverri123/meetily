@@ -10,7 +10,6 @@
 use super::loader::get_template;
 use super::types::{Template, TemplateSection};
 use crate::database::models::TokenUsagePurpose;
-use crate::database::token_usage_recorder::record_token_usage;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::summary::processor::chunk_text;
 use crate::summary::template_commands::TemplateInfo;

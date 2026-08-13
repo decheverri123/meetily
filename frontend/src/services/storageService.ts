@@ -29,6 +29,7 @@ export interface Folder {
   id: string;
   name: string;
   icon?: string;
+  is_auto: boolean;
   created_at: string;
   updated_at: string;
 }

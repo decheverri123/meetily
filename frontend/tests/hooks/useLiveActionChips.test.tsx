@@ -14,6 +14,8 @@ mock.module('@/contexts/RecordingStateContext', () => ({
 let invokeImpl: (cmd: string, args?: unknown) => Promise<string> = async () => '';
 mock.module('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, args?: unknown) => invokeImpl(cmd, args),
+  transformCallback: (callback?: any, once?: boolean) => 0,
+  isTauri: () => true,
 }));
 
 const { useLiveActionChips } = await import('../../src/hooks/useLiveActionChips');

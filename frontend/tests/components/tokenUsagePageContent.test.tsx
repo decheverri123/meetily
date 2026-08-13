@@ -12,6 +12,8 @@ mock.module('@/contexts/ConfigContext', () => ({
 let invokeImpl: (cmd: string, args?: unknown) => Promise<unknown> = async () => [];
 mock.module('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, args?: unknown) => invokeImpl(cmd, args),
+  transformCallback: (callback?: any, once?: boolean) => 0,
+  isTauri: () => true,
 }));
 
 const rows: TokenUsage[] = [

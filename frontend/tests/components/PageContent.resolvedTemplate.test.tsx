@@ -7,6 +7,14 @@ import { mockTauriInvoke } from './askPanelTestUtils';
 // child panels. Only the template-resolution wiring is under test here, so
 // the Sidebar/Config contexts and the panel components are stubbed - none of
 // them are exercised by the `summaryData` -> `applyResolvedTemplate` path.
+mock.module('next/navigation', () => ({
+  useRouter: () => ({
+    push: () => {},
+    replace: () => {},
+    prefetch: () => {},
+  }),
+}));
+
 mock.module('@/components/Sidebar/SidebarProvider', () => ({
   useSidebar: () => ({
     serverAddress: '',

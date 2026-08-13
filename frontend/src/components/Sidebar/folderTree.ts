@@ -5,6 +5,7 @@ export interface SidebarItem {
   title: string;
   type: 'folder' | 'file';
   icon?: string;
+  isAuto?: boolean;
   children?: SidebarItem[];
   meetingId?: string;
   folderId?: string;
@@ -45,6 +46,7 @@ export function buildSidebarTree(
         title: f.name,
         type: 'folder' as const,
         icon: f.icon,
+        isAuto: f.is_auto,
         children: children,
         folderId: f.id,
       };

@@ -33,6 +33,8 @@ pub struct FolderModel {
     pub updated_at: DateTimeUtc,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    #[serde(default)]
+    pub is_auto: bool,
 }
 
 // Renamed from TranscriptSegment to Transcript to match the table name

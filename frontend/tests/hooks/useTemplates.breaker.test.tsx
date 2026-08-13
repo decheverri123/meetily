@@ -7,9 +7,11 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 let invokeImpl: (cmd: string, args?: unknown) => Promise<unknown> = async () => [];
 mock.module('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, args?: unknown) => invokeImpl(cmd, args),
+  transformCallback: (callback?: any, once?: boolean) => 0,
+  isTauri: () => true,
 }));
 
-const { useTemplates } = await import('../../src/hooks/meeting-details/useTemplates');
+const { useTemplates, AUTO_TEMPLATE_ID } = await import('../../src/hooks/meeting-details/useTemplates');
 
 describe('useTemplates - YouTube import default_template wiring', () => {
   beforeEach(() => {
@@ -48,7 +50,7 @@ describe('useTemplates - YouTube import default_template wiring', () => {
     // availableTemplates, so it must not be applied - selectedTemplate
     // stays on the hook's existing default instead of pointing at a
     // template id the dropdown can't match.
-    expect(result.current.selectedTemplate).toBe('standard_meeting');
+    expect(result.current.selectedTemplate).toBe(AUTO_TEMPLATE_ID);
     const exists = result.current.availableTemplates.some(t => t.id === result.current.selectedTemplate);
     expect(exists).toBe(true);
   });

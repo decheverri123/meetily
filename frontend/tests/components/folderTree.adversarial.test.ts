@@ -29,8 +29,8 @@ describe('buildSidebarTree — adversarial', () => {
 
   test('handles empty meetings list with multiple folders', () => {
     const folders: Folder[] = [
-      { id: 'f1', name: 'A', created_at: '', updated_at: '' },
-      { id: 'f2', name: 'B', created_at: '', updated_at: '' },
+      { id: 'f1', name: 'A', is_auto: false, created_at: '', updated_at: '' },
+      { id: 'f2', name: 'B', is_auto: false, created_at: '', updated_at: '' },
     ];
     const tree = buildSidebarTree(folders, []);
     const childIds = tree[0].children!.map((c) => c.id).sort();
@@ -45,7 +45,7 @@ describe('buildSidebarTree — adversarial', () => {
 
   test('handles folder with whitespace-only name', () => {
     const folders: Folder[] = [
-      { id: 'f1', name: '   ', created_at: '', updated_at: '' },
+      { id: 'f1', name: '   ', is_auto: false, created_at: '', updated_at: '' },
     ];
     const tree = buildSidebarTree(folders, []);
     expect(tree[0].children![0].title).toBe('   ');
@@ -54,7 +54,7 @@ describe('buildSidebarTree — adversarial', () => {
   test('handles folder with very long name (5KB)', () => {
     const longName = 'a'.repeat(5_000);
     const folders: Folder[] = [
-      { id: 'f1', name: longName, created_at: '', updated_at: '' },
+      { id: 'f1', name: longName, is_auto: false, created_at: '', updated_at: '' },
     ];
     const tree = buildSidebarTree(folders, []);
     expect(tree[0].children![0].title.length).toBe(5_000);
@@ -62,9 +62,9 @@ describe('buildSidebarTree — adversarial', () => {
 
   test('handles folder names with Unicode/RTL/emoji', () => {
     const folders: Folder[] = [
-      { id: 'f1', name: '中文', created_at: '', updated_at: '' },
-      { id: 'f2', name: 'العربية', created_at: '', updated_at: '' },
-      { id: 'f3', name: '📁 Folder 🚀', created_at: '', updated_at: '' },
+      { id: 'f1', name: '中文', is_auto: false, created_at: '', updated_at: '' },
+      { id: 'f2', name: 'العربية', is_auto: false, created_at: '', updated_at: '' },
+      { id: 'f3', name: '📁 Folder 🚀', is_auto: false, created_at: '', updated_at: '' },
     ];
     const tree = buildSidebarTree(folders, []);
     const titles = tree[0].children!.map((c) => c.title);
@@ -75,8 +75,8 @@ describe('buildSidebarTree — adversarial', () => {
 
   test('handles duplicate folder names — both are kept', () => {
     const folders: Folder[] = [
-      { id: 'f1', name: 'Same', created_at: '', updated_at: '' },
-      { id: 'f2', name: 'Same', created_at: '', updated_at: '' },
+      { id: 'f1', name: 'Same', is_auto: false, created_at: '', updated_at: '' },
+      { id: 'f2', name: 'Same', is_auto: false, created_at: '', updated_at: '' },
     ];
     const tree = buildSidebarTree(folders, []);
     // Both folders appear. The "id" field still distinguishes them.
@@ -95,7 +95,7 @@ describe('buildSidebarTree — adversarial', () => {
       { id: 'm2', title: 'Real meeting', folder_id: 'f1', folder_name: 'F1' },
     ];
     const folders: Folder[] = [
-      { id: 'f1', name: 'F1', created_at: '', updated_at: '' },
+      { id: 'f1', name: 'F1', is_auto: false, created_at: '', updated_at: '' },
     ];
     const tree = buildSidebarTree(folders, meetings);
     const allIds = JSON.stringify(tree);
@@ -118,7 +118,7 @@ describe('buildSidebarTree — adversarial', () => {
       { id: 'm1', title: 'Empty id', folder_id: '' as any, folder_name: null },
     ];
     const folders: Folder[] = [
-      { id: 'f1', name: 'F1', created_at: '', updated_at: '' },
+      { id: 'f1', name: 'F1', is_auto: false, created_at: '', updated_at: '' },
     ];
     const tree = buildSidebarTree(folders, meetings);
     const unfiled = tree[0].children!.find((c) => c.id === UNFILED_FOLDER_ID);
@@ -137,7 +137,7 @@ describe('buildSidebarTree — adversarial', () => {
       folder_name: 'Big',
     }));
     const folders: Folder[] = [
-      { id: 'f1', name: 'Big', created_at: '', updated_at: '' },
+      { id: 'f1', name: 'Big', is_auto: false, created_at: '', updated_at: '' },
     ];
     const tree = buildSidebarTree(folders, meetings);
     const f1 = tree[0].children!.find((c) => c.id === 'f:f1')!;
@@ -157,7 +157,7 @@ describe('buildSidebarTree — adversarial', () => {
 describe('findItemById — adversarial', () => {
   test('handles id with special characters', () => {
     const folders: Folder[] = [
-      { id: 'f/with/slashes', name: 'X', created_at: '', updated_at: '' },
+      { id: 'f/with/slashes', name: 'X', is_auto: false, created_at: '', updated_at: '' },
     ];
     const tree = buildSidebarTree(folders, []);
     // The builder uses `f:` + id, so we look up 'f:f/with/slashes'.
@@ -168,8 +168,8 @@ describe('findItemById — adversarial', () => {
 
   test('handles id that is a prefix of another id (no false match)', () => {
     const folders: Folder[] = [
-      { id: 'f1', name: 'A', created_at: '', updated_at: '' },
-      { id: 'f10', name: 'B', created_at: '', updated_at: '' },
+      { id: 'f1', name: 'A', is_auto: false, created_at: '', updated_at: '' },
+      { id: 'f10', name: 'B', is_auto: false, created_at: '', updated_at: '' },
     ];
     const tree = buildSidebarTree(folders, []);
     expect(findItemById(tree, 'f:f1')?.title).toBe('A');

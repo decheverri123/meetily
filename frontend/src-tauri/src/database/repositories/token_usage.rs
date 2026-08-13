@@ -120,7 +120,7 @@ impl TokenUsageRepository {
 
         let sql = format!(
             "SELECT \
-             strftime('{fmt}', strftime('%Y-%m-%d %H:%M:%S', created_at)) AS bucket_start, \
+             strftime('{fmt}', created_at) AS bucket_start, \
              COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, \
              COALESCE(SUM(completion_tokens), 0) AS completion_tokens, \
              COALESCE(SUM(total_tokens), 0) AS total_tokens, \

@@ -96,6 +96,7 @@ export interface SummaryTemplate {
 export interface SummaryDataResponse {
   markdown?: string;
   summary_json?: BlockNoteBlock[];
+  meeting_id?: string | null;
   // Auto-template-selection metadata (see plan_template_resolution/
   // build_summary_result_json in src-tauri/src/summary/service.rs)
   resolved_template_id?: string | null;

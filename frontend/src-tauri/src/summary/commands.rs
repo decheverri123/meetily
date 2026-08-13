@@ -10,7 +10,6 @@ use crate::database::repositories::{
 use crate::state::AppState;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::database::models::TokenUsagePurpose;
-use crate::database::token_usage_recorder::record_token_usage;
 use crate::summary::processor::tokens_to_chars;
 use crate::summary::metadata::{
     read_default_template_from_metadata, read_detected_summary_language_from_metadata,

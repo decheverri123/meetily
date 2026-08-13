@@ -1,5 +1,4 @@
 use crate::database::models::TokenUsagePurpose;
-use crate::database::token_usage_recorder::record_token_usage;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::summary::templates::Template;
 use once_cell::sync::Lazy;

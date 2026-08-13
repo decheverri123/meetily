@@ -4,6 +4,8 @@ const invokeMock = mock(async () => null);
 
 mock.module("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
+  transformCallback: (callback, once) => 0,
+  isTauri: () => true,
 }));
 
 function installLocalStorage() {

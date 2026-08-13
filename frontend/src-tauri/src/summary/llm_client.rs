@@ -89,6 +89,10 @@ pub struct OllamaChatRequest {
 #[derive(Deserialize, Debug)]
 pub struct OllamaChatResponse {
     pub message: MessageContent,
+    #[serde(default)]
+    pub prompt_eval_count: Option<i64>,
+    #[serde(default)]
+    pub eval_count: Option<i64>,
 }
 
 // Claude-specific request structure
@@ -481,15 +485,22 @@ pub async fn generate_summary(
             prompt_tokens: u.input_tokens,
             completion_tokens: u.output_tokens,
             total_tokens: u.input_tokens + u.output_tokens,
+        }).or_else(|| {
+            let prompt_tokens = crate::summary::processor::rough_token_count(&format!("{}{}", system_prompt, user_prompt)) as i64;
+            let completion_tokens = crate::summary::processor::rough_token_count(content) as i64;
+            Some(LLMUsage {
+                provider: provider.clone(),
+                model: model_name.to_string(),
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+            })
         });
         GenerateSummaryOutput {
             summary: content.to_string(),
             usage,
         }
     } else if provider == &LLMProvider::Ollama {
-        // Ollama's native /api/chat doesn't always return usage; fine to
-        // emit `usage: None` here - the OpenAI-compat path below covers
-        // providers that do.
         let chat_response = response
             .json::<OllamaChatResponse>()
             .await
@@ -497,9 +508,24 @@ pub async fn generate_summary(
 
         info!("🐞 LLM Response received from {}", provider_name(provider));
 
+        let summary = chat_response.message.content.trim().to_string();
+        let prompt_tokens = chat_response.prompt_eval_count.unwrap_or_else(|| {
+            crate::summary::processor::rough_token_count(&format!("{}{}", system_prompt, user_prompt)) as i64
+        });
+        let completion_tokens = chat_response.eval_count.unwrap_or_else(|| {
+            crate::summary::processor::rough_token_count(&summary) as i64
+        });
+        let usage = LLMUsage {
+            provider: provider.clone(),
+            model: model_name.to_string(),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        };
+
         GenerateSummaryOutput {
-            summary: chat_response.message.content.trim().to_string(),
-            usage: None,
+            summary,
+            usage: Some(usage),
         }
     } else {
         let chat_response = response
@@ -522,6 +548,16 @@ pub async fn generate_summary(
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
             total_tokens: u.total_tokens,
+        }).or_else(|| {
+            let prompt_tokens = crate::summary::processor::rough_token_count(&format!("{}{}", system_prompt, user_prompt)) as i64;
+            let completion_tokens = crate::summary::processor::rough_token_count(content) as i64;
+            Some(LLMUsage {
+                provider: provider.clone(),
+                model: model_name.to_string(),
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+            })
         });
         GenerateSummaryOutput {
             summary: content.to_string(),

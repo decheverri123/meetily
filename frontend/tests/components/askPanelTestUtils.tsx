@@ -34,6 +34,8 @@ export function mockTauriInvoke() {
       calls.push({ cmd, args });
       return impl(cmd, args);
     },
+    transformCallback: (callback?: any, once?: boolean) => 0,
+    isTauri: () => true,
   }));
   return {
     calls,

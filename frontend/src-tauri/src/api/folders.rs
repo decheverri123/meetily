@@ -13,7 +13,6 @@ use crate::{
         repositories::{
             folders::FoldersRepository, meeting::MeetingsRepository, setting::SettingsRepository,
         },
-        token_usage_recorder::record_token_usage,
     },
     state::AppState,
     summary::llm_client::{generate_summary, LLMProvider},
@@ -332,7 +331,7 @@ async fn categorize_one(
                     (Some(f.id), Some(f.name), None)
                 }
                 None => {
-                    let created = FoldersRepository::create_folder(pool, &name)
+                    let created = FoldersRepository::create_auto_folder(pool, &name)
                         .await
                         .map_err(|e| format!("Failed to create folder: {}", e))?;
                     FoldersRepository::assign_meeting(pool, meeting_id, Some(&created.id))
@@ -343,7 +342,7 @@ async fn categorize_one(
             }
         }
         CategorizeDecision::New(name) => {
-            let created = FoldersRepository::create_folder(pool, &name)
+            let created = FoldersRepository::create_auto_folder(pool, &name)
                 .await
                 .map_err(|e| format!("Failed to create folder: {}", e))?;
             FoldersRepository::assign_meeting(pool, meeting_id, Some(&created.id))

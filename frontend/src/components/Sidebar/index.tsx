@@ -29,7 +29,7 @@ import {
 } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useSidebar } from './SidebarProvider';
-import { FOLDER_ROOT_ID, type SidebarItem } from './folderTree';
+import { FOLDER_ROOT_ID, UNFILED_FOLDER_ID, type SidebarItem } from './folderTree';
 import { getFolderIcon, getMeetingIcon } from './getFolderIcon';
 import { ConfirmationModal } from '../ConfirmationModel/confirmation-modal';
 import { ModelConfig } from '@/components/ModelSettingsModal';
@@ -768,7 +768,16 @@ const Sidebar: React.FC = () => {
               ) : (
                 <Calendar className="w-4 h-4 mr-2 text-muted-foreground" />
               )}
-              <span className={depth === 0 ? "" : "font-medium"}>{item.title}</span>
+              <span
+                className={[
+                  depth === 0 ? '' : 'font-medium',
+                  item.isAuto && 'magic-cue-chip glass-pill px-2.5 py-0.5 rounded-full text-xs ml-1',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
+                {item.title}
+              </span>
               <div className="ml-auto flex items-center gap-1">
                 {isUserFolder && (
                   <button
@@ -832,6 +841,26 @@ const Sidebar: React.FC = () => {
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
+                    {item.folderId && item.folderId !== FOLDER_ROOT_ID && item.folderId !== UNFILED_FOLDER_ID && (
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          try {
+                            await assignMeetingToFolder(item.meetingId!, null);
+                            toast.success(`Removed from folder`);
+                          } catch (err) {
+                            toast.error('Failed to remove from folder', {
+                              description: err instanceof Error ? err.message : String(err),
+                            });
+                          }
+                        }}
+                        className="text-muted-foreground hover:text-amber-500 p-1 rounded-md hover:bg-amber-500/10 flex-shrink-0"
+                        aria-label="Remove from folder"
+                        title="Remove from folder"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
