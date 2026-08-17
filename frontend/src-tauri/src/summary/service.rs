@@ -214,6 +214,12 @@ struct SummaryCacheSource {
     max_tokens: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
+    /// Coarse bucket index of the meeting duration (0 = <15 min, 1 = 15-30,
+    /// ... 5 = 2h+). Drives the length-target prompt, so two regenerations
+    /// of the same transcript that crossed a duration threshold cannot share
+    /// a cached English summary.
+    #[serde(default)]
+    meeting_duration_bucket: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -249,7 +255,22 @@ fn build_summary_cache_source(
     max_tokens: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
+    meeting_duration_seconds: Option<f64>,
 ) -> SummaryCacheSource {
+    // Bucket the meeting duration so the cache fingerprint only changes
+    // when the duration crosses a length-target threshold (15 / 30 / 60 /
+    // 90 / 120 minutes), not every time it changes by a second.
+    let meeting_duration_bucket = meeting_duration_seconds.map(|d| {
+        const BUCKETS_MIN: &[f64] = &[15.0, 30.0, 60.0, 90.0, 120.0];
+        let mins = d / 60.0;
+        let mut idx = 0usize;
+        for (i, bound) in BUCKETS_MIN.iter().enumerate() {
+            if mins >= *bound {
+                idx = i + 1;
+            }
+        }
+        idx as u32
+    });
     SummaryCacheSource {
         transcript_fingerprint: stable_text_fingerprint(text),
         custom_prompt_fingerprint: stable_text_fingerprint(custom_prompt),
@@ -263,6 +284,7 @@ fn build_summary_cache_source(
         max_tokens,
         temperature,
         top_p,
+        meeting_duration_bucket,
     }
 }
 
@@ -491,6 +513,7 @@ impl SummaryService {
         template_id: String,
         custom_template_json: Option<String>,
         summary_language: Option<String>,
+        meeting_duration_seconds: Option<f64>,
     ) {
         let start_time = Instant::now();
         info!(
@@ -674,6 +697,7 @@ impl SummaryService {
             custom_openai_max_tokens,
             custom_openai_temperature,
             custom_openai_top_p,
+            meeting_duration_seconds,
         );
 
         let cached_english = match SummaryProcessesRepository::get_summary_data(&pool, &meeting_id).await {
@@ -725,6 +749,7 @@ impl SummaryService {
             summary_language.as_deref(),
             detected_summary_language.as_deref(),
             cached_english.as_deref(),
+            meeting_duration_seconds,
         )
         .await;
 
@@ -986,6 +1011,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1105,6 +1131,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             ),
             build_summary_cache_source(
                 "transcript body",
@@ -1115,6 +1142,7 @@ mod tests {
                 "ollama",
                 "gemma3:1b",
                 Some("http://localhost:11434"),
+                None,
                 None,
                 None,
                 None,
@@ -1133,6 +1161,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             ),
             build_summary_cache_source(
                 "transcript body",
@@ -1143,6 +1172,7 @@ mod tests {
                 "openai",
                 "gemma3:1b",
                 Some("http://localhost:11434"),
+                None,
                 None,
                 None,
                 None,
@@ -1161,6 +1191,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             ),
             build_summary_cache_source(
                 "transcript body",
@@ -1171,6 +1202,7 @@ mod tests {
                 "ollama",
                 "gemma3:1b",
                 Some("http://localhost:11500"),
+                None,
                 None,
                 None,
                 None,
@@ -1189,6 +1221,7 @@ mod tests {
                 Some(2048),
                 Some(0.2),
                 Some(0.9),
+                None,
             ),
         ];
 

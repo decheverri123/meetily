@@ -66,7 +66,8 @@ export default function PageContent({
   const [isRecording] = useState(false);
   const [summaryResponse] = useState<SummaryResponse | null>(null);
   // Ask sidebar: docked beside the note, dismissible, toggled with Cmd/Ctrl+J.
-  const [showAskPanel, setShowAskPanel] = useState(true);
+  // Collapsed by default — opt in via Cmd/Ctrl+J or the FAB.
+  const [showAskPanel, setShowAskPanel] = useState(false);
   // Collapsed by default: the ask sidebar is the primary surface on this
   // screen now, and the transcript is a reference panel a user opts into.
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(true);

@@ -7,7 +7,6 @@
 //! an unknown template id) falls back to the bundled `standard_meeting`
 //! template.
 
-use super::loader::get_template;
 use super::types::{Template, TemplateSection};
 use crate::database::models::TokenUsagePurpose;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
@@ -17,10 +16,15 @@ use reqwest::Client;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, warn};
+use tracing::warn;
 
-/// Template id used as the last-resort fallback whenever selection fails.
-const FALLBACK_TEMPLATE_ID: &str = "standard_meeting";
+/// Template id used as the last-resort fallback whenever generation fails.
+/// With templates temporarily disabled we cannot fall back to a preset —
+/// `select_template` always generates one on the fly, but if generation
+/// itself fails (LLM error, parse error, validation error) we degrade to a
+/// minimal hardcoded template so summary generation still produces
+/// *something* rather than failing the whole run.
+const FALLBACK_TEMPLATE_ID: &str = "__generated_fallback__";
 
 /// Token budget for the transcript excerpt sent to the classification call.
 /// This is a lightweight selection/classification prompt, not a summary, so
@@ -114,26 +118,20 @@ pub async fn select_template(
     resolve_parsed_choice(parse_llm_response(&raw))
 }
 
-/// Resolves a `ParsedChoice` (already-parsed LLM intent) against the
-/// template store, applying the fallback rule on any failure. Split out from
-/// `select_template` so the parse -> resolve steps are each independently
-/// testable without a live LLM.
+/// Resolves a `ParsedChoice` (already-parsed LLM intent) into a
+/// `TemplateChoice`. Templates are temporarily disabled, so `Match` is
+/// always rejected and the LLM is forced to `Generate` on the fly. Split
+/// out from `select_template` so the parse -> resolve steps are each
+/// independently testable without a live LLM.
 fn resolve_parsed_choice(parsed: Result<ParsedChoice, String>) -> TemplateChoice {
     match parsed {
-        Ok(ParsedChoice::Match(id)) => match get_template(&id) {
-            Ok(template) => TemplateChoice {
-                template,
-                template_id: Some(id),
-                is_generated: false,
-            },
-            Err(e) => {
-                warn!(
-                    "select_template: LLM matched unknown template id '{}' ({}), falling back to '{}'",
-                    id, e, FALLBACK_TEMPLATE_ID
-                );
-                fallback_choice()
-            }
-        },
+        Ok(ParsedChoice::Match(id)) => {
+            warn!(
+                "select_template: ignoring LLM 'match' response ('{}') — templates are temporarily disabled, on-the-fly generation only",
+                id
+            );
+            fallback_choice()
+        }
         Ok(ParsedChoice::Generate(template)) => TemplateChoice {
             template,
             template_id: None,
@@ -141,46 +139,36 @@ fn resolve_parsed_choice(parsed: Result<ParsedChoice, String>) -> TemplateChoice
         },
         Err(e) => {
             warn!(
-                "select_template: failed to parse LLM response, falling back to '{}': {}",
-                FALLBACK_TEMPLATE_ID, e
+                "select_template: failed to parse LLM response, falling back: {}",
+                e
             );
             fallback_choice()
         }
     }
 }
 
-/// Last-resort fallback used whenever any step of selection fails.
+/// Last-resort fallback used whenever any step of selection/generation
+/// fails. With templates disabled we never load from the bundled store —
+/// we degrade to a minimal hardcoded template so summary generation still
+/// produces *something* rather than failing the whole run.
 fn fallback_choice() -> TemplateChoice {
-    match get_template(FALLBACK_TEMPLATE_ID) {
-        Ok(template) => TemplateChoice {
-            template,
-            template_id: Some(FALLBACK_TEMPLATE_ID.to_string()),
-            is_generated: false,
+    warn!(
+        "select_template: falling back to a hardcoded minimal template (templates are temporarily disabled)"
+    );
+    TemplateChoice {
+        template: Template {
+            name: "Auto-generated Summary".to_string(),
+            description: "Hardcoded fallback used when on-the-fly template generation fails.".to_string(),
+            sections: vec![TemplateSection {
+                title: "Summary".to_string(),
+                instruction: "Summarize the transcript.".to_string(),
+                format: "paragraph".to_string(),
+                item_format: None,
+                example_item_format: None,
+            }],
         },
-        Err(e) => {
-            // Should never happen (standard_meeting is embedded in the
-            // binary), but never panic on template selection - degrade to a
-            // minimal hardcoded template instead.
-            error!(
-                "select_template: bundled fallback template '{}' failed to load ({}); using hardcoded minimal template",
-                FALLBACK_TEMPLATE_ID, e
-            );
-            TemplateChoice {
-                template: Template {
-                    name: "Standard Meeting Notes".to_string(),
-                    description: "General meeting summary.".to_string(),
-                    sections: vec![TemplateSection {
-                        title: "Summary".to_string(),
-                        instruction: "Summarize the meeting.".to_string(),
-                        format: "paragraph".to_string(),
-                        item_format: None,
-                        example_item_format: None,
-                    }],
-                },
-                template_id: Some(FALLBACK_TEMPLATE_ID.to_string()),
-                is_generated: false,
-            }
-        }
+        template_id: Some(FALLBACK_TEMPLATE_ID.to_string()),
+        is_generated: false,
     }
 }
 
@@ -231,49 +219,39 @@ fn build_transcript_excerpt(transcript: &str) -> String {
     }
 }
 
-/// Builds the system prompt instructing the LLM to either match a candidate
-/// template or generate a new one, as strict JSON.
-fn build_system_prompt(candidates: &[TemplateInfo]) -> String {
-    let candidate_list = if candidates.is_empty() {
-        "(no existing templates available)".to_string()
-    } else {
-        candidates
-            .iter()
-            .map(|c| format!("- id: \"{}\", name: \"{}\", description: \"{}\"", c.id, c.name, c.description))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
+/// Builds the system prompt instructing the LLM to generate a fresh
+/// template tailored to the transcript. Templates are temporarily
+/// disabled — there are no presets to match against, so the LLM is
+/// forced to always generate on the fly.
+fn build_system_prompt(_candidates: &[TemplateInfo]) -> String {
     format!(
-        r#"You are selecting or designing a meeting summary template based on a transcript excerpt.
+        r#"You are designing a brand-new, one-use meeting summary template tailored to the transcript excerpt below. There are no preset templates to choose from — you must generate one from scratch.
 
-Below are the existing templates available. If one of them genuinely fits the meeting content based on its name and description, respond by matching it. Otherwise, design a brand-new one-use template tailored to this meeting.
+Read the transcript excerpt carefully and design a template whose sections match what this specific content actually needs. Do not reuse a generic "meeting notes" structure unless the content really is a generic meeting. If it's a video essay, design sections for thesis, argument structure, evidence, counterpoints, and verdict. If it's a standup, design sections for blockers, progress, and next steps. Match the medium and the subject.
 
-EXISTING TEMPLATES:
-{candidate_list}
+Respond with strict JSON only (no markdown, no commentary, no code fences) in exactly this shape:
 
-Respond with strict JSON only (no markdown, no commentary, no code fences) in exactly one of these two shapes:
-
-1. To match an existing template:
-{{"match": "<template_id>"}}
-
-2. To generate a new template:
-{{"generate": {{"name": "...", "description": "...", "sections": [{{"title": "...", "instruction": "...", "format": "paragraph|list|string", "item_format": null, "example_item_format": null}}]}}}}
-
-Example of a real template's shape (for reference only - do not copy verbatim unless it genuinely fits):
 {{
-  "name": "Standard Meeting Notes",
-  "description": "A standard template for general meetings, focusing on key outcomes and actions.",
+  "name": "<short human-readable template name>",
+  "description": "<one-sentence description of what this template captures>",
   "sections": [
-    {{"title": "Summary", "instruction": "Provide a brief, one-paragraph executive summary of the entire meeting.", "format": "paragraph"}},
-    {{"title": "Action Items", "instruction": "List all assigned tasks with their owners and due date.", "format": "list", "item_format": "| **Owner** | Task | Due |\n| --- | --- | --- |"}}
+    {{
+      "title": "<section heading>",
+      "instruction": "<specific, detailed instruction for what to write in this section — be concrete, not generic>",
+      "format": "paragraph|list|string",
+      "item_format": null,
+      "example_item_format": null
+    }}
   ]
 }}
 
 Rules:
 - "format" must be exactly one of "paragraph", "list", or "string".
-- Only use "match" when a candidate's name/description genuinely fits this meeting's content.
-- Output only the JSON object and nothing else."#
+- "item_format" and "example_item_format" must be null unless you have a strong reason to set them (table-shaped output); leaving them null is the safe default.
+- Output only the JSON object and nothing else.
+- The first section should be a high-level overview; subsequent sections should drill into specifics the content actually contains.
+- Do not invent generic sections like "Action Items" or "Key Takeaways" unless the transcript genuinely has action items or takeaways.
+- Do NOT emit sections for metadata that is not in the transcript. Sections like "Video Info", "Channel/Creator", "URL", "Title", "Publication Date", "Source" are almost never useful — the transcript rarely contains them and any placeholder value ("Not stated", "Unknown", "Not provided") wastes the user's time. Only include such a section if the transcript explicitly and unambiguously states the relevant fact."#
     )
 }
 
@@ -375,16 +353,10 @@ mod tests {
     // ---- resolve_parsed_choice ----
 
     #[test]
-    fn resolve_parsed_choice_match_resolves_known_template() {
+    fn resolve_parsed_choice_match_always_falls_back_when_templates_disabled() {
+        // Templates are temporarily disabled, so a `match` response is always
+        // rejected regardless of whether the id corresponds to a known preset.
         let choice = resolve_parsed_choice(Ok(ParsedChoice::Match("daily_standup".to_string())));
-        assert_eq!(choice.template_id.as_deref(), Some("daily_standup"));
-        assert!(!choice.is_generated);
-        assert_eq!(choice.template.name, "Daily Standup");
-    }
-
-    #[test]
-    fn resolve_parsed_choice_match_falls_back_on_unknown_id() {
-        let choice = resolve_parsed_choice(Ok(ParsedChoice::Match("does_not_exist".to_string())));
         assert_eq!(choice.template_id.as_deref(), Some(FALLBACK_TEMPLATE_ID));
         assert!(!choice.is_generated);
     }
@@ -415,65 +387,10 @@ mod tests {
         assert!(!choice.is_generated);
     }
 
-    // ---- resolve_parsed_choice: path traversal via LLM-controlled "match" id ----
-    //
-    // `select_template`'s system prompt only advertises the candidate ids it
-    // was given, but `resolve_parsed_choice` never checks the LLM's returned
-    // "match" id against that candidate list - it is passed straight to
-    // `get_template`/`load_bundled_template`, which builds a path via
-    // `bundled_dir.join(format!("{}.json", template_id))` with no
-    // sanitization. An LLM response (which is influenced by
-    // attacker-controlled transcript content, e.g. prompt injection) can
-    // therefore make the resolver read and surface the contents of an
-    // arbitrary `*.json` file elsewhere on disk as if it were a trusted
-    // template.
-    #[test]
-    fn resolve_parsed_choice_match_id_escapes_bundled_templates_dir() {
-        let root = std::env::temp_dir().join(format!(
-            "meetily_breaker_traversal_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let bundled_dir = root.join("bundled");
-        let outside_dir = root.join("outside");
-        std::fs::create_dir_all(&bundled_dir).unwrap();
-        std::fs::create_dir_all(&outside_dir).unwrap();
-
-        // A file that lives OUTSIDE the officially-configured bundled
-        // templates directory - this stands in for any arbitrary *.json file
-        // on the user's disk that happens to be shaped like a Template.
-        let secret_path = outside_dir.join("secret.json");
-        std::fs::write(
-            &secret_path,
-            r#"{"name": "SECRET LEAKED TEMPLATE", "description": "should never be reachable via match id", "sections": [{"title": "x", "instruction": "x", "format": "paragraph"}]}"#,
-        )
-        .unwrap();
-
-        crate::summary::templates::set_bundled_templates_dir(bundled_dir);
-
-        // Simulate the LLM returning a path-traversal-shaped "match" id
-        // instead of one of the advertised candidate ids.
-        let choice = resolve_parsed_choice(Ok(ParsedChoice::Match("../outside/secret".to_string())));
-
-        std::fs::remove_dir_all(&root).ok();
-
-        // A safe implementation would refuse this id (unknown/invalid) and
-        // fall back to the bundled standard_meeting template. Instead, the
-        // traversal succeeds and the "outside" file's content is loaded and
-        // returned as if it were a legitimate template.
-        assert_ne!(
-            choice.template.name, "SECRET LEAKED TEMPLATE",
-            "match id '../outside/secret' escaped the bundled templates directory and loaded an arbitrary file from disk"
-        );
-    }
-
     // ---- fallback_choice ----
 
     #[test]
-    fn fallback_choice_loads_standard_meeting() {
+    fn fallback_choice_returns_hardcoded_minimal_template() {
         let choice = fallback_choice();
         assert_eq!(choice.template_id.as_deref(), Some(FALLBACK_TEMPLATE_ID));
         assert!(!choice.is_generated);
@@ -506,21 +423,22 @@ mod tests {
     // ---- build_system_prompt ----
 
     #[test]
-    fn build_system_prompt_lists_candidates() {
-        let candidates = vec![
-            candidate("daily_standup", "Daily Standup", "Time-boxed daily updates"),
-            candidate("standard_meeting", "Standard Meeting Notes", "General meeting notes"),
-        ];
-        let prompt = build_system_prompt(&candidates);
-        assert!(prompt.contains("daily_standup"));
-        assert!(prompt.contains("standard_meeting"));
-        assert!(prompt.contains("\"match\""));
-        assert!(prompt.contains("\"generate\""));
-    }
-
-    #[test]
-    fn build_system_prompt_handles_no_candidates() {
+    fn build_system_prompt_instructs_on_the_fly_generation_only() {
+        // Templates are temporarily disabled - the prompt must only describe
+        // the on-the-fly generation shape and never advertise a `match`
+        // option pointing at preset templates.
         let prompt = build_system_prompt(&[]);
-        assert!(prompt.contains("no existing templates available"));
+        assert!(
+            prompt.contains("\"name\""),
+            "prompt should describe the top-level JSON shape (name/description/sections)"
+        );
+        assert!(
+            prompt.contains("\"sections\""),
+            "prompt should describe the sections array"
+        );
+        assert!(
+            !prompt.contains("\"match\""),
+            "system prompt should not advertise a 'match' option when templates are disabled"
+        );
     }
 }

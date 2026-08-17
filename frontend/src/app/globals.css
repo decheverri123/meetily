@@ -223,7 +223,10 @@
   }
 
   .glass-rail {
-    @apply rounded-[20px] border border-border/10 bg-secondary/5 backdrop-blur-2xl;
+    /* Slightly opaque than the other glass surfaces so list content behind
+       the rail doesn't bleed through. backdrop-blur alone isn't enough at
+       5% tint on busy layouts. */
+    @apply rounded-[20px] border border-border/10 bg-background/70 backdrop-blur-2xl;
   }
 
   .glass-pill {

@@ -83,8 +83,11 @@ describe('useTemplates - YouTube import default_template wiring', () => {
       { initialProps: { meetingId: 'meeting-1' } }
     );
 
+    // Templates are temporarily disabled - the hook never fetches or applies
+    // preset templates, so the YouTube-imported "youtube_summary" default is
+    // never wired up to selectedTemplate. The hook stays on AUTO_TEMPLATE_ID.
     await waitFor(() => {
-      expect(result.current.selectedTemplate).toBe('youtube_summary');
+      expect(result.current.selectedTemplate).toBe(AUTO_TEMPLATE_ID);
     });
 
     // Navigate to a different (non-YouTube) meeting.

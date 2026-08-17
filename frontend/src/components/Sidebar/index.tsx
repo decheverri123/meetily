@@ -52,7 +52,7 @@ import { VisuallyHidden } from "@/components/ui/visually-hidden"
 
 import { MessageToast } from '../MessageToast';
 import Logo from '../Logo';
-import { FolderAskPanel } from './FolderAskPanel';
+import { AiChatOverlay } from '@/components/shared/AiChatOverlay';
 import Info from '../Info';
 import { ComplianceNotification } from '../ComplianceNotification';
 import { Input } from '../ui/input';
@@ -90,6 +90,12 @@ const Sidebar: React.FC = () => {
   const [folderContextMenu, setFolderContextMenu] = useState<{
     folderId: string;
     folderName: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [meetingContextMenu, setMeetingContextMenu] = useState<{
+    meetingId: string;
+    folderId: string | null;
     x: number;
     y: number;
   } | null>(null);
@@ -702,6 +708,17 @@ const Sidebar: React.FC = () => {
             : `px-3 py-2 my-1 rounded-lg text-sm cursor-pointer transition-colors duration-150 ${leafRowClass} ${isDropTarget ? 'ring-2 ring-primary/60 bg-primary/5' : ''}`
             }`}
           style={item.type === 'folder' && depth === 0 ? {} : { paddingLeft }}
+          onContextMenu={(e) => {
+            if (isMeetingItem && item.meetingId) {
+              e.preventDefault();
+              setMeetingContextMenu({
+                meetingId: item.meetingId,
+                folderId: item.folderId ?? null,
+                x: e.clientX,
+                y: e.clientY,
+              });
+            }
+          }}
           draggable={isMeetingItem}
           onDragStart={(e) => {
             if (isMeetingItem && item.meetingId) {
@@ -968,7 +985,7 @@ const Sidebar: React.FC = () => {
             {!isCollapsed && (
               <div
                 className="flex-1 overflow-y-auto custom-scrollbar min-h-0"
-                onClick={() => setFolderContextMenu(null)}
+                onClick={() => { setFolderContextMenu(null); setMeetingContextMenu(null); }}
               >
                 {filteredSidebarItems
                   .filter(item => item.type === 'folder' && item.id === FOLDER_ROOT_ID)
@@ -982,20 +999,23 @@ const Sidebar: React.FC = () => {
           </div>
         </div>
 
-        {folderAskTarget && !isCollapsed && (
-          <div className="flex-shrink-0 border-t border-border/10 px-4 py-3">
-            <FolderAskPanel
-              folderId={folderAskTarget.folderId}
-              folderName={folderAskTarget.folderName}
-            />
-            <button
-              onClick={() => setFolderAskTarget(null)}
-              className="mt-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Close
-            </button>
-          </div>
-        )}
+        <AiChatOverlay
+          hideFab
+          open={folderAskTarget !== null}
+          onOpenChange={open => { if (!open) setFolderAskTarget(null); }}
+          scoped={
+            folderAskTarget
+              ? {
+                  command: 'ask_about_folder',
+                  buildArgs: (question: string) => ({ folderId: folderAskTarget.folderId, question }),
+                  segments: [],
+                  suggestions: [],
+                  placeholder: `Ask about “${folderAskTarget.folderName}”…`,
+                  modelLabel: '',
+                }
+              : undefined
+          }
+        />
 
         {!isCollapsed && (
 
@@ -1111,6 +1131,48 @@ const Sidebar: React.FC = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {meetingContextMenu && (
+        <div
+          className="fixed z-50 min-w-[180px] rounded-lg border border-border/20 bg-background/95 text-popover-foreground backdrop-blur-md shadow-xl py-1 text-sm"
+          style={{ left: meetingContextMenu.x, top: meetingContextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {meetingContextMenu.folderId && meetingContextMenu.folderId !== FOLDER_ROOT_ID && meetingContextMenu.folderId !== UNFILED_FOLDER_ID && (
+            <button
+              onClick={async () => {
+                const meetingId = meetingContextMenu.meetingId;
+                setMeetingContextMenu(null);
+                try {
+                  await assignMeetingToFolder(meetingId, null);
+                  toast.success('Removed from folder');
+                } catch (err) {
+                  toast.error('Failed to remove from folder', {
+                    description: err instanceof Error ? err.message : String(err),
+                  });
+                }
+              }}
+              className="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-accent-foreground text-popover-foreground flex items-center gap-2"
+            >
+              <X className="w-3.5 h-3.5" />
+              Remove from folder
+            </button>
+          )}
+          {meetingContextMenu.folderId && meetingContextMenu.folderId !== FOLDER_ROOT_ID && meetingContextMenu.folderId !== UNFILED_FOLDER_ID && (
+            <div className="my-1 border-t border-border/10" />
+          )}
+          <button
+            onClick={() => {
+              setDeleteModalState({ isOpen: true, itemId: meetingContextMenu.meetingId });
+              setMeetingContextMenu(null);
+            }}
+            className="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-accent-foreground text-popover-foreground flex items-center gap-2"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            Delete meeting
+          </button>
+        </div>
+      )}
 
       {folderContextMenu && (
         <div

@@ -36,6 +36,9 @@ interface AiChatOverlayProps {
   fabLabel?: string;
   /** Hide the FAB entirely (e.g. during post-stop finalization). */
   hidden?: boolean;
+  /** When true, suppresses the standalone FAB - the panel still opens at the
+   *  right edge, but the trigger is owned externally (e.g. sidebar context menu). */
+  hideFab?: boolean;
 }
 
 /**
@@ -56,6 +59,7 @@ export function AiChatOverlay({
   scoped,
   fabLabel = 'Ask AI',
   hidden = false,
+  hideFab = false,
 }: AiChatOverlayProps) {
   const [internalOpen, setInternalOpen] = useState(false);
   const isControlled = controlledOpen !== undefined;
@@ -126,24 +130,27 @@ export function AiChatOverlay({
 
       {/* FAB. Anchored bottom-right; transitions to a close-X inside the panel
           via opacity/scale so users can drop the panel without leaving the
-          content area. */}
-      <button
-        type="button"
-        onClick={() => setOpen(o => !o)}
-        aria-label={open ? 'Close AI chat' : fabLabel}
-        aria-expanded={open}
-        className={cn(
-          'fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-accent-violet to-primary text-primary-foreground shadow-[0_10px_30px_-8px_rgba(0,0,0,.6)]',
-          'transition-all duration-300 ease-out motion-reduce:transition-none',
-          'hover:scale-105 active:scale-95',
-          open && 'pointer-events-none scale-0 opacity-0'
-        )}
-      >
-        <Sparkles className="h-5 w-5" />
-        {hasUnread && !open && (
-          <span className="absolute -right-0.5 -top-0.5 h-3.5 w-3.5 rounded-full border-2 border-background bg-destructive" />
-        )}
-      </button>
+          content area. Hidden when the trigger lives elsewhere (e.g. sidebar
+          context menu). */}
+      {!hideFab && (
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          aria-label={open ? 'Close AI chat' : fabLabel}
+          aria-expanded={open}
+          className={cn(
+            'fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-accent-violet to-primary text-primary-foreground shadow-[0_10px_30px_-8px_rgba(0,0,0,.6)]',
+            'transition-all duration-300 ease-out motion-reduce:transition-none',
+            'hover:scale-105 active:scale-95',
+            open && 'pointer-events-none scale-0 opacity-0'
+          )}
+        >
+          <Sparkles className="h-5 w-5" />
+          {hasUnread && !open && (
+            <span className="absolute -right-0.5 -top-0.5 h-3.5 w-3.5 rounded-full border-2 border-background bg-destructive" />
+          )}
+        </button>
+      )}
     </>
   );
 }

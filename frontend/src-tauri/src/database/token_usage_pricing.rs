@@ -247,11 +247,15 @@ fn pick_closest<'a>(
 }
 
 fn parse_price_per_million(price: &Option<String>) -> Option<f64> {
-    price
-        .as_deref()?
-        .parse::<f64>()
-        .ok()
-        .map(|v| v * 1_000_000.0)
+    let raw = price.as_deref()?.parse::<f64>().ok()?;
+    // OpenRouter returns "-1" for router/meta-models (e.g. `openrouter/auto`,
+    // `openrouter/auto-beta`) to signal "variable pricing — depends on the
+    // model the router picks per request". Any negative or non-finite value
+    // would otherwise multiply token counts into negative dollars in the UI.
+    if !raw.is_finite() || raw < 0.0 {
+        return None;
+    }
+    Some(raw * 1_000_000.0)
 }
 
 fn last_path_segment(id: &str) -> &str {
@@ -392,5 +396,57 @@ mod tests {
         assert!((parse_price_per_million(&Some("0.0000001".to_string())).unwrap() - 0.1).abs() < 1e-9);
         assert_eq!(parse_price_per_million(&Some("not-a-number".to_string())), None);
         assert_eq!(parse_price_per_million(&None), None);
+        assert_eq!(parse_price_per_million(&Some("0".to_string())), Some(0.0));
+    }
+
+    #[test]
+    fn price_string_rejects_sentinel_and_negative_values() {
+        // OpenRouter uses "-1" to signal variable pricing on router models.
+        // Any negative or non-finite value must collapse to None so the UI
+        // shows "—" instead of a negative dollar amount.
+        assert_eq!(parse_price_per_million(&Some("-1".to_string())), None);
+        assert_eq!(parse_price_per_million(&Some("-0.0000001".to_string())), None);
+        assert_eq!(parse_price_per_million(&Some("NaN".to_string())), None);
+        assert_eq!(parse_price_per_million(&Some("inf".to_string())), None);
+        assert_eq!(parse_price_per_million(&Some("-inf".to_string())), None);
+    }
+
+    #[test]
+    fn resolve_other_returns_null_prices_for_openrouter_router_models() {
+        // end-to-end: OpenRouter catalog returns "-1" for the router models.
+        // `resolve_other` must surface None for both prices so the UI shows "—".
+        let req = request("openrouter", "openrouter/auto-beta");
+        let catalog = vec![
+            OpenRouterModel {
+                id: "openrouter/auto-beta".to_string(),
+                name: "Auto Router (Beta)".to_string(),
+                context_length: None,
+                prompt_price: Some("-1".to_string()),
+                completion_price: Some("-1".to_string()),
+            },
+            OpenRouterModel {
+                id: "openrouter/auto".to_string(),
+                name: "Auto Router".to_string(),
+                context_length: None,
+                prompt_price: Some("-1".to_string()),
+                completion_price: Some("-1".to_string()),
+            },
+        ];
+        let result = resolve_other(
+            &req,
+            &catalog,
+            ModelPricing {
+                model: req.model.clone(),
+                provider: req.provider.clone(),
+                prompt_price_per_million: None,
+                completion_price_per_million: None,
+                matched_openrouter_id: None,
+                source: "unknown".to_string(),
+            },
+        );
+        assert_eq!(result.source, "openrouter");
+        assert_eq!(result.prompt_price_per_million, None);
+        assert_eq!(result.completion_price_per_million, None);
+        assert_eq!(result.matched_openrouter_id.as_deref(), Some("openrouter/auto-beta"));
     }
 }

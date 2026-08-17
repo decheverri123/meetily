@@ -24,18 +24,13 @@ export function useTemplates(meetingId?: string) {
   const prevMeetingIdRef = useRef<string | undefined>(undefined);
   const userSelectedMeetingIdRef = useRef<string | null>(null);
 
-  // Fetch available templates on mount
+  // Templates are temporarily disabled — the AI agent now generates a
+  // template on the fly per meeting, so we don't fetch or surface any
+  // preset templates. `fetchedTemplates` stays empty, `availableTemplates`
+  // collapses to just the "Auto (recommended)" synthetic entry, and the
+  // template picker in SummaryGeneratorButtonGroup is hidden.
   useEffect(() => {
-    const fetchTemplates = async () => {
-      try {
-        const templates = (await invokeTauri('api_list_templates')) as TemplateOption[];
-        console.log('Available templates:', templates);
-        setFetchedTemplates(templates);
-      } catch (error) {
-        console.error('Failed to fetch templates:', error);
-      }
-    };
-    fetchTemplates();
+    setFetchedTemplates([]);
   }, []);
 
   // Fetch stored default_template when meetingId changes

@@ -325,7 +325,10 @@ export function SummaryGeneratorButtonGroup({
         </DialogContent>
       </Dialog>
 
-      {availableTemplates.length > 0 && (
+      {/* Templates are temporarily disabled — the AI agent now designs a fresh
+          template on the fly per meeting, so there is nothing to pick from.
+          Re-enable by restoring this block. */}
+      {false && availableTemplates.length > 0 && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button

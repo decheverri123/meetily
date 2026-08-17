@@ -133,11 +133,13 @@ export function useSummaryGeneration({
     transcriptText,
     transcriptTexts,
     customPrompt = '',
+    meetingDurationSeconds = 0,
     isRegeneration = false,
   }: {
     transcriptText: string;
     transcriptTexts?: string[];
     customPrompt?: string;
+    meetingDurationSeconds?: number;
     isRegeneration?: boolean;
   }) => {
     setSummaryStatus(isRegeneration ? 'regenerating' : 'processing');
@@ -189,6 +191,7 @@ export function useSummaryGeneration({
         customPrompt: customPrompt,
         ...buildTemplateInvokePayload(selectedTemplate, generatedTemplate),
         summaryLanguage,
+        meetingDurationSeconds,
       }) as any;
 
       const process_id = result.process_id;
@@ -482,11 +485,19 @@ export function useSummaryGeneration({
       return `[${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
     };
 
+    // Derive meeting duration from the last transcript's audio_end_time so the
+    // backend can scale summary length/depth by content volume. Falls back to
+    // audio_start_time if end is missing, then 0.
+    const lastTranscript = allTranscripts[allTranscripts.length - 1];
+    const meetingDurationSeconds =
+      lastTranscript?.audio_end_time ?? lastTranscript?.audio_start_time ?? 0;
+
     return {
       transcriptText: allTranscripts
         .map(t => `${formatTime(t.audio_start_time, t.timestamp)} ${t.text}`)
         .join('\n'),
       transcriptTexts: allTranscripts.map(t => t.text),
+      meetingDurationSeconds,
     };
   }, []);
 
